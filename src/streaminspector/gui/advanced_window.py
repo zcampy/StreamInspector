@@ -18,6 +18,7 @@ from streaminspector.gui.main_window import (
     _format_headers,
     _pretty_json,
 )
+from streaminspector.gui.replay_dialog import ReplayDialog
 from streaminspector.gui.session_window import SessionMainWindow
 from streaminspector.storage import StorageService
 
@@ -25,7 +26,7 @@ FLOW_ID_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class AdvancedMainWindow(SessionMainWindow):
-    """Traffic window with sorting, exports and contextual copy actions."""
+    """Traffic window with sorting, exports and contextual request actions."""
 
     def __init__(
         self,
@@ -34,12 +35,18 @@ class AdvancedMainWindow(SessionMainWindow):
         initial_flows: list[HttpFlowCaptured] | None = None,
     ) -> None:
         super().__init__(event_bus, storage, initial_flows=initial_flows)
+        self._replay_dialogs: list[ReplayDialog] = []
         self._install_advanced_actions()
 
     def _install_advanced_actions(self) -> None:
         self.history.setSortingEnabled(True)
         self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.history.customContextMenuRequested.connect(self._show_context_menu)
+
+        tools_menu = self.menuBar().addMenu("Peticiones")
+        replay_action = QAction("Repetir petición seleccionada…", self)
+        replay_action.triggered.connect(self._replay_selected)
+        tools_menu.addAction(replay_action)
 
         export_menu = self.menuBar().addMenu("Exportar")
         for label, extension, exporter in (
@@ -100,6 +107,9 @@ class AdvancedMainWindow(SessionMainWindow):
         if flow is None:
             return
         menu = QMenu(self)
+        replay_action = menu.addAction("Repetir petición…")
+        replay_action.triggered.connect(lambda: self._open_replay_dialog(flow))
+        menu.addSeparator()
         actions = (
             ("Copiar URL", flow.url),
             ("Copiar cabeceras de petición", _format_headers(flow.request_headers)),
@@ -114,6 +124,19 @@ class AdvancedMainWindow(SessionMainWindow):
                 lambda _checked=False, value=text: QApplication.clipboard().setText(value)
             )
         menu.exec(self.history.viewport().mapToGlobal(position))
+
+    def _replay_selected(self) -> None:
+        flow = self._selected_flow()
+        if flow is None:
+            QMessageBox.information(self, "Repetir petición", "Selecciona una captura primero.")
+            return
+        self._open_replay_dialog(flow)
+
+    def _open_replay_dialog(self, flow: HttpFlowCaptured) -> None:
+        dialog = ReplayDialog(flow, self)
+        self._replay_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._replay_dialogs.remove(dialog))
+        dialog.show()
 
     def _visible_flows(self) -> list[HttpFlowCaptured]:
         visible_ids: list[str] = []
