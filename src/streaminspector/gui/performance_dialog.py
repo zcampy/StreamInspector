@@ -6,7 +6,6 @@ from statistics import mean, median
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QTableWidget,
     QTableWidgetItem,
@@ -74,7 +73,12 @@ def _slowest_table(flows: list[HttpFlowCaptured]) -> QTableWidget:
     ranked = sorted(flows, key=lambda flow: flow.duration_ms or 0, reverse=True)[:100]
     table.setRowCount(len(ranked))
     for row, flow in enumerate(ranked):
-        values = [flow.method, str(flow.status_code or ""), f"{flow.duration_ms or 0:.1f} ms", flow.url]
+        values = [
+            flow.method,
+            str(flow.status_code or ""),
+            f"{flow.duration_ms or 0:.1f} ms",
+            flow.url,
+        ]
         for column, value in enumerate(values):
             table.setItem(row, column, QTableWidgetItem(value))
     table.resizeColumnsToContents()
@@ -83,7 +87,11 @@ def _slowest_table(flows: list[HttpFlowCaptured]) -> QTableWidget:
 
 def _largest_table(flows: list[HttpFlowCaptured]) -> QTableWidget:
     table = _base_table(["Método", "Estado", "Tamaño", "URL"])
-    ranked = sorted(flows, key=lambda flow: flow.request_size + flow.response_size, reverse=True)[:100]
+    ranked = sorted(
+        flows,
+        key=lambda flow: flow.request_size + flow.response_size,
+        reverse=True,
+    )[:100]
     table.setRowCount(len(ranked))
     for row, flow in enumerate(ranked):
         values = [
