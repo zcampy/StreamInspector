@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC
 from pathlib import Path
 
 from sqlalchemy import create_engine, delete, select
@@ -97,8 +98,14 @@ class StorageService:
 
     @staticmethod
     def _to_event(flow: CapturedFlow) -> HttpFlowCaptured:
+        captured_at = flow.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=UTC)
+        else:
+            captured_at = captured_at.astimezone(UTC)
+
         return HttpFlowCaptured(
-            created_at=flow.captured_at,
+            created_at=captured_at,
             flow_id=flow.flow_id,
             method=flow.method,
             scheme=flow.scheme,
