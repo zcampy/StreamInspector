@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from streaminspector.core.events import (
@@ -14,13 +16,27 @@ from streaminspector.core.events import (
     StoredHistoryDeleted,
     StoredHistoryDeleteRequested,
 )
-from streaminspector.storage.models import Base, CapturedFlow
+from streaminspector.storage.models import (
+    Base,
+    CapturedFlow,
+    CaptureSession,
+    FlowSessionLink,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    id: int
+    name: str
+    started_at: datetime
+    ended_at: datetime | None
+    flow_count: int
+
+
 class StorageService:
-    """Persist captured flows in SQLite and expose recent history."""
+    """Persist captured flows and group new traffic into capture sessions."""
 
     def __init__(self, event_bus: EventBus, database_path: Path) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,16 +44,78 @@ class StorageService:
         self._engine = create_engine(f"sqlite:///{database_path}", future=True)
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False)
         Base.metadata.create_all(self._engine)
+        self._active_session_id = self.create_session()
         self._unsubscribe_flow = event_bus.subscribe(HttpFlowCaptured, self._store_flow)
         self._unsubscribe_delete = event_bus.subscribe(
             StoredHistoryDeleteRequested,
             self._delete_stored_history,
         )
 
+    @property
+    def active_session_id(self) -> int:
+        return self._active_session_id
+
     def close(self) -> None:
+        self.end_session(self._active_session_id)
         self._unsubscribe_flow()
         self._unsubscribe_delete()
         self._engine.dispose()
+
+    def create_session(self, name: str | None = None) -> int:
+        started_at = datetime.now(UTC)
+        session_name = name or f"Sesión {started_at.astimezone().strftime('%d/%m/%Y %H:%M')}"
+        with self._session_factory() as session:
+            model = CaptureSession(name=session_name, started_at=started_at)
+            session.add(model)
+            session.commit()
+            return model.id
+
+    def rename_session(self, session_id: int, name: str) -> None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("El nombre de la sesión no puede estar vacío")
+        with self._session_factory() as session:
+            session.execute(
+                update(CaptureSession)
+                .where(CaptureSession.id == session_id)
+                .values(name=clean_name)
+            )
+            session.commit()
+
+    def end_session(self, session_id: int) -> None:
+        with self._session_factory() as session:
+            session.execute(
+                update(CaptureSession)
+                .where(CaptureSession.id == session_id, CaptureSession.ended_at.is_(None))
+                .values(ended_at=datetime.now(UTC))
+            )
+            session.commit()
+
+    def list_sessions(self, limit: int = 100) -> list[SessionSummary]:
+        with self._session_factory() as session:
+            statement = (
+                select(
+                    CaptureSession.id,
+                    CaptureSession.name,
+                    CaptureSession.started_at,
+                    CaptureSession.ended_at,
+                    func.count(FlowSessionLink.flow_pk),
+                )
+                .outerjoin(FlowSessionLink, FlowSessionLink.session_id == CaptureSession.id)
+                .group_by(CaptureSession.id)
+                .order_by(CaptureSession.started_at.desc())
+                .limit(limit)
+            )
+            return [
+                SessionSummary(
+                    id=row.id,
+                    name=row.name,
+                    started_at=_as_utc(row.started_at),
+                    ended_at=_as_utc(row.ended_at) if row.ended_at else None,
+                    flow_count=row[4],
+                )
+                for row in session.execute(statement)
+            ]
 
     def recent(self, limit: int = 500) -> list[CapturedFlow]:
         with Session(self._engine) as session:
@@ -47,30 +125,45 @@ class StorageService:
     def recent_events(self, limit: int = 500) -> list[HttpFlowCaptured]:
         return [self._to_event(flow) for flow in self.recent(limit)]
 
+    def session_events(self, session_id: int, limit: int = 500) -> list[HttpFlowCaptured]:
+        with self._session_factory() as session:
+            statement = (
+                select(CapturedFlow)
+                .join(FlowSessionLink, FlowSessionLink.flow_pk == CapturedFlow.id)
+                .where(FlowSessionLink.session_id == session_id)
+                .order_by(CapturedFlow.id.desc())
+                .limit(limit)
+            )
+            flows = list(reversed(session.scalars(statement).all()))
+        return [self._to_event(flow) for flow in flows]
+
     def _store_flow(self, event: HttpFlowCaptured) -> None:
         try:
             with self._session_factory() as session:
+                model = CapturedFlow(
+                    flow_id=event.flow_id,
+                    captured_at=event.created_at,
+                    method=event.method,
+                    scheme=event.scheme,
+                    host=event.host,
+                    port=event.port,
+                    path=event.path,
+                    url=event.url,
+                    http_version=event.http_version,
+                    status_code=event.status_code,
+                    reason=event.reason,
+                    content_type=event.content_type,
+                    request_headers_json=json.dumps(event.request_headers),
+                    response_headers_json=json.dumps(event.response_headers),
+                    request_body=event.request_body,
+                    response_body=event.response_body,
+                    response_size=event.response_size,
+                    duration_ms=event.duration_ms,
+                )
+                session.add(model)
+                session.flush()
                 session.add(
-                    CapturedFlow(
-                        flow_id=event.flow_id,
-                        captured_at=event.created_at,
-                        method=event.method,
-                        scheme=event.scheme,
-                        host=event.host,
-                        port=event.port,
-                        path=event.path,
-                        url=event.url,
-                        http_version=event.http_version,
-                        status_code=event.status_code,
-                        reason=event.reason,
-                        content_type=event.content_type,
-                        request_headers_json=json.dumps(event.request_headers),
-                        response_headers_json=json.dumps(event.response_headers),
-                        request_body=event.request_body,
-                        response_body=event.response_body,
-                        response_size=event.response_size,
-                        duration_ms=event.duration_ms,
-                    )
+                    FlowSessionLink(flow_pk=model.id, session_id=self._active_session_id)
                 )
                 session.commit()
         except Exception as exc:
@@ -82,9 +175,13 @@ class StorageService:
     def _delete_stored_history(self, _event: StoredHistoryDeleteRequested) -> None:
         try:
             with self._session_factory() as session:
-                result = session.execute(delete(CapturedFlow))
+                deleted_count = session.scalar(select(func.count(CapturedFlow.id))) or 0
+                session.execute(delete(FlowSessionLink))
+                session.execute(delete(CapturedFlow))
+                session.execute(
+                    delete(CaptureSession).where(CaptureSession.id != self._active_session_id)
+                )
                 session.commit()
-                deleted_count = result.rowcount or 0
             self._event_bus.publish(StoredHistoryDeleted(deleted_count=deleted_count))
         except Exception as exc:
             LOGGER.exception("Could not delete stored history")
@@ -98,7 +195,7 @@ class StorageService:
     @staticmethod
     def _to_event(flow: CapturedFlow) -> HttpFlowCaptured:
         return HttpFlowCaptured(
-            created_at=flow.captured_at,
+            created_at=_as_utc(flow.captured_at),
             flow_id=flow.flow_id,
             method=flow.method,
             scheme=flow.scheme,
@@ -117,3 +214,9 @@ class StorageService:
             response_size=flow.response_size,
             duration_ms=flow.duration_ms,
         )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
