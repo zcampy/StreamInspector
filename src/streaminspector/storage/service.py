@@ -4,10 +4,16 @@ import json
 import logging
 from pathlib import Path
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
+from streaminspector.core.events import (
+    EventBus,
+    HttpFlowCaptured,
+    StatusMessage,
+    StoredHistoryDeleted,
+    StoredHistoryDeleteRequested,
+)
 from streaminspector.storage.models import Base, CapturedFlow
 
 LOGGER = logging.getLogger(__name__)
@@ -22,16 +28,24 @@ class StorageService:
         self._engine = create_engine(f"sqlite:///{database_path}", future=True)
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False)
         Base.metadata.create_all(self._engine)
-        self._unsubscribe = event_bus.subscribe(HttpFlowCaptured, self._store_flow)
+        self._unsubscribe_flow = event_bus.subscribe(HttpFlowCaptured, self._store_flow)
+        self._unsubscribe_delete = event_bus.subscribe(
+            StoredHistoryDeleteRequested,
+            self._delete_stored_history,
+        )
 
     def close(self) -> None:
-        self._unsubscribe()
+        self._unsubscribe_flow()
+        self._unsubscribe_delete()
         self._engine.dispose()
 
     def recent(self, limit: int = 500) -> list[CapturedFlow]:
         with Session(self._engine) as session:
             statement = select(CapturedFlow).order_by(CapturedFlow.id.desc()).limit(limit)
             return list(reversed(session.scalars(statement).all()))
+
+    def recent_events(self, limit: int = 500) -> list[HttpFlowCaptured]:
+        return [self._to_event(flow) for flow in self.recent(limit)]
 
     def _store_flow(self, event: HttpFlowCaptured) -> None:
         try:
@@ -64,3 +78,42 @@ class StorageService:
             self._event_bus.publish(
                 StatusMessage(message=f"No se pudo guardar la captura: {exc}", level="error")
             )
+
+    def _delete_stored_history(self, _event: StoredHistoryDeleteRequested) -> None:
+        try:
+            with self._session_factory() as session:
+                result = session.execute(delete(CapturedFlow))
+                session.commit()
+                deleted_count = result.rowcount or 0
+            self._event_bus.publish(StoredHistoryDeleted(deleted_count=deleted_count))
+        except Exception as exc:
+            LOGGER.exception("Could not delete stored history")
+            self._event_bus.publish(
+                StatusMessage(
+                    message=f"No se pudo borrar el historial guardado: {exc}",
+                    level="error",
+                )
+            )
+
+    @staticmethod
+    def _to_event(flow: CapturedFlow) -> HttpFlowCaptured:
+        return HttpFlowCaptured(
+            created_at=flow.captured_at,
+            flow_id=flow.flow_id,
+            method=flow.method,
+            scheme=flow.scheme,
+            host=flow.host,
+            port=flow.port,
+            path=flow.path,
+            url=flow.url,
+            http_version=flow.http_version,
+            status_code=flow.status_code,
+            reason=flow.reason,
+            content_type=flow.content_type,
+            request_headers=tuple(tuple(item) for item in json.loads(flow.request_headers_json)),
+            response_headers=tuple(tuple(item) for item in json.loads(flow.response_headers_json)),
+            request_body=flow.request_body or b"",
+            response_body=flow.response_body or b"",
+            response_size=flow.response_size,
+            duration_ms=flow.duration_ms,
+        )
