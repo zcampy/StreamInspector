@@ -45,9 +45,7 @@ class CapturePolicy:
         host = (flow.host or "").lower().rstrip(".")
         if any(_domain_matches(host, pattern) for pattern in self.excluded_domains):
             return False
-        if self.omit_static and _is_static(flow):
-            return False
-        return True
+        return not (self.omit_static and _is_static(flow))
 
 
 def normalize_domains(value: str) -> tuple[str, ...]:
