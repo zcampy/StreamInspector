@@ -14,6 +14,7 @@ from streaminspector.core.events import (
     StatusMessage,
 )
 from streaminspector.gui.advanced_window import AdvancedMainWindow
+from streaminspector.gui.https_setup_dialog import HttpsSetupDialog
 from streaminspector.storage import StorageService
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
@@ -31,6 +32,7 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
     ) -> None:
         super().__init__(event_bus, storage, initial_flows=initial_flows)
         self._proxy_settings = QSettings("StreamInspector", "StreamInspector")
+        self._https_dialogs: list[HttpsSetupDialog] = []
         self._install_proxy_actions()
         self._show_proxy_endpoint()
 
@@ -44,6 +46,11 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         diagnose_action = QAction("Diagnosticar configuración…", self)
         diagnose_action.triggered.connect(self._diagnose_proxy)
         menu.addAction(diagnose_action)
+
+        menu.addSeparator()
+        https_action = QAction("Configurar navegador y HTTPS…", self)
+        https_action.triggered.connect(self._show_https_setup)
+        menu.addAction(https_action)
 
     def _proxy_endpoint(self) -> tuple[str, int]:
         host = str(self._proxy_settings.value("proxy/host", DEFAULT_PROXY_HOST)).strip()
@@ -115,6 +122,18 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
             "No es necesario definir STREAMINSPECTOR_PROXY__HOST ni "
             "STREAMINSPECTOR_PROXY__PORT manualmente.",
         )
+
+    def _show_https_setup(self) -> None:
+        host, port = self._proxy_endpoint()
+        dialog = HttpsSetupDialog(
+            host,
+            port,
+            proxy_running=self.proxy_button.isChecked(),
+            parent=self,
+        )
+        self._https_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._https_dialogs.remove(dialog))
+        dialog.show()
 
 
 def _check_bind_error(host: str, port: int) -> str | None:
