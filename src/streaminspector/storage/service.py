@@ -75,12 +75,38 @@ class StorageService:
         if not clean_name:
             raise ValueError("El nombre de la sesión no puede estar vacío")
         with self._session_factory() as session:
-            session.execute(
+            result = session.execute(
                 update(CaptureSession)
                 .where(CaptureSession.id == session_id)
                 .values(name=clean_name)
             )
+            if result.rowcount == 0:
+                raise ValueError("La sesión no existe")
             session.commit()
+
+    def delete_session(self, session_id: int) -> int:
+        if session_id == self._active_session_id:
+            raise ValueError("La sesión activa no se puede eliminar")
+        with self._session_factory() as session:
+            flow_ids = list(
+                session.scalars(
+                    select(FlowSessionLink.flow_pk).where(
+                        FlowSessionLink.session_id == session_id
+                    )
+                )
+            )
+            session.execute(
+                delete(FlowSessionLink).where(FlowSessionLink.session_id == session_id)
+            )
+            if flow_ids:
+                session.execute(delete(CapturedFlow).where(CapturedFlow.id.in_(flow_ids)))
+            result = session.execute(
+                delete(CaptureSession).where(CaptureSession.id == session_id)
+            )
+            if result.rowcount == 0:
+                raise ValueError("La sesión no existe")
+            session.commit()
+            return len(flow_ids)
 
     def end_session(self, session_id: int) -> None:
         with self._session_factory() as session:
