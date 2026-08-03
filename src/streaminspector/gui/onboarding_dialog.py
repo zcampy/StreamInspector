@@ -21,15 +21,17 @@ from streaminspector.system_proxy import system_proxy_supported
 def diagnostic_report(host: str, port: int, data_dir: Path) -> str:
     certificate_present, certificate_files = certificate_status()
     certificates = ", ".join(path.name for path in certificate_files) or "no encontrados"
+    proxy_support = "disponible" if system_proxy_supported() else "no disponible"
+    data_status = "sí" if data_dir.exists() else "se creará al usarlo"
     return "\n".join(
         (
             f"Python: {platform.python_version()} ({sys.executable})",
             f"Sistema: {platform.system()} {platform.release()}",
             f"Proxy configurado: {host}:{port}",
-            f"Proxy automático de Windows: {'disponible' if system_proxy_supported() else 'no disponible'}",
+            f"Proxy automático de Windows: {proxy_support}",
             f"Certificados mitmproxy: {certificates}",
             f"Directorio de datos: {data_dir}",
-            f"Directorio de datos accesible: {'sí' if data_dir.exists() else 'se creará al usarlo'}",
+            f"Directorio de datos accesible: {data_status}",
         )
     )
 
