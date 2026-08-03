@@ -43,7 +43,11 @@ class ProxyService:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._thread = Thread(target=self._thread_main, name="streaminspector-proxy", daemon=True)
+            self._thread = Thread(
+                target=self._thread_main,
+                name="streaminspector-proxy",
+                daemon=True,
+            )
             self._thread.start()
 
     def stop(self) -> None:
