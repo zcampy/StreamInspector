@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ class StorageService:
         self._event_bus = event_bus
         self._engine = create_engine(f"sqlite:///{database_path}", future=True)
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False)
+        self._capture_filter: Callable[[HttpFlowCaptured], bool] = lambda _flow: True
         Base.metadata.create_all(self._engine)
         self._active_session_id = self.create_session()
         self._unsubscribe_flow = event_bus.subscribe(HttpFlowCaptured, self._store_flow)
@@ -54,6 +56,11 @@ class StorageService:
     @property
     def active_session_id(self) -> int:
         return self._active_session_id
+
+    def set_capture_filter(
+        self, predicate: Callable[[HttpFlowCaptured], bool]
+    ) -> None:
+        self._capture_filter = predicate
 
     def close(self) -> None:
         self.end_session(self._active_session_id)
@@ -164,6 +171,8 @@ class StorageService:
         return [self._to_event(flow) for flow in flows]
 
     def _store_flow(self, event: HttpFlowCaptured) -> None:
+        if not self._capture_filter(event):
+            return
         try:
             with self._session_factory() as session:
                 model = CapturedFlow(
