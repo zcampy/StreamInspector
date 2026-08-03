@@ -2,15 +2,16 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-rem Use an already installed compatible Python, regardless of launcher configuration.
-call :try_python py -3.13
-if not errorlevel 1 exit /b 0
-call :try_python py -3.12
-if not errorlevel 1 exit /b 0
-call :try_python python
-if not errorlevel 1 exit /b 0
-call :try_python python3
-if not errorlevel 1 exit /b 0
+rem Find one compatible interpreter and run bootstrap exactly once.
+call :is_supported py -3.13
+if not errorlevel 1 goto :run_py313
+call :is_supported py -3.12
+if not errorlevel 1 goto :run_py312
+call :is_supported python
+if not errorlevel 1 goto :run_python
+call :is_supported python3
+if not errorlevel 1 goto :run_python3
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" goto :run_known312
 
 echo [StreamInspector] No se encontro Python 3.12 o superior.
 where winget >nul 2>nul
@@ -20,15 +21,11 @@ echo [StreamInspector] Instalando Python 3.12 automaticamente...
 winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements --scope user
 if errorlevel 1 goto :install_failed
 
-rem Winget may not refresh PATH in this window, so try known locations first.
-if exist "%LocalAppData%\Programs\Python\Python312\python.exe" (
-    "%LocalAppData%\Programs\Python\Python312\python.exe" bootstrap.py
-    if not errorlevel 1 exit /b 0
-)
-call :try_python py -3.12
-if not errorlevel 1 exit /b 0
-call :try_python python
-if not errorlevel 1 exit /b 0
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" goto :run_known312
+call :is_supported py -3.12
+if not errorlevel 1 goto :run_py312
+call :is_supported python
+if not errorlevel 1 goto :run_python
 
 echo.
 echo Python se instalo, pero Windows aun no ha actualizado PATH.
@@ -36,11 +33,39 @@ echo Cierra esta ventana y vuelve a ejecutar este archivo.
 pause
 exit /b 1
 
-:try_python
+:run_py313
+py -3.13 bootstrap.py
+goto :finish
+
+:run_py312
+py -3.12 bootstrap.py
+goto :finish
+
+:run_python
+python bootstrap.py
+goto :finish
+
+:run_python3
+python3 bootstrap.py
+goto :finish
+
+:run_known312
+"%LocalAppData%\Programs\Python\Python312\python.exe" bootstrap.py
+goto :finish
+
+:is_supported
 %* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" >nul 2>nul
-if errorlevel 1 exit /b 1
-%* bootstrap.py
 exit /b %errorlevel%
+
+:finish
+set "APP_EXIT=%errorlevel%"
+if not "%APP_EXIT%"=="0" (
+    echo.
+    echo StreamInspector no pudo iniciarse.
+    echo Revisa los mensajes anteriores para identificar el error.
+    pause
+)
+exit /b %APP_EXIT%
 
 :no_python
 echo.
