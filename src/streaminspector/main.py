@@ -41,7 +41,8 @@ def build_application() -> tuple[
     app.aboutToQuit.connect(proxy_service.close)
     app.aboutToQuit.connect(storage_service.close)
 
-    window = MainWindow(event_bus)
+    initial_flows = storage_service.recent_events(limit=500)
+    window = MainWindow(event_bus, initial_flows=initial_flows)
     event_bus.publish(ApplicationStarted(version=__version__))
     return app, window, event_bus, proxy_service, storage_service
 

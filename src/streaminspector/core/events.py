@@ -50,6 +50,16 @@ class ProxyError(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class StoredHistoryDeleteRequested(Event):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class StoredHistoryDeleted(Event):
+    deleted_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class HttpFlowCaptured(Event):
     flow_id: str = ""
     method: str = ""
