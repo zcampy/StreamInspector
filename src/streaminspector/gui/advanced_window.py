@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSettings, QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
+from streaminspector import __version__
 from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
 from streaminspector.exporting import (
     flows_to_csv,
@@ -13,6 +14,7 @@ from streaminspector.exporting import (
     flows_to_json,
     format_request,
 )
+from streaminspector.gui.compare_dialog import CompareDialog
 from streaminspector.gui.main_window import (
     _decode_body,
     _format_headers,
@@ -36,7 +38,12 @@ class AdvancedMainWindow(SessionMainWindow):
     ) -> None:
         super().__init__(event_bus, storage, initial_flows=initial_flows)
         self._replay_dialogs: list[ReplayDialog] = []
+        self._compare_dialogs: list[CompareDialog] = []
         self._install_advanced_actions()
+        self.statusBar().showMessage(
+            "Inicio recomendado en Windows: Iniciar StreamInspector.bat", 12000
+        )
+        QTimer.singleShot(0, self._show_startup_notice)
 
     def _install_advanced_actions(self) -> None:
         self.history.setSortingEnabled(True)
@@ -47,6 +54,14 @@ class AdvancedMainWindow(SessionMainWindow):
         replay_action = QAction("Repetir petición seleccionada…", self)
         replay_action.triggered.connect(self._replay_selected)
         tools_menu.addAction(replay_action)
+        compare_action = QAction("Comparar capturas…", self)
+        compare_action.triggered.connect(self._compare_flows)
+        tools_menu.addAction(compare_action)
+
+        help_menu = self.menuBar().addMenu("Ayuda")
+        startup_action = QAction("Cómo iniciar StreamInspector", self)
+        startup_action.triggered.connect(lambda: self._show_startup_notice(force=True))
+        help_menu.addAction(startup_action)
 
         export_menu = self.menuBar().addMenu("Exportar")
         for label, extension, exporter in (
@@ -62,6 +77,21 @@ class AdvancedMainWindow(SessionMainWindow):
 
         for row, flow in enumerate(self._flows):
             self._attach_flow_id(row, flow.flow_id)
+
+    def _show_startup_notice(self, force: bool = False) -> None:
+        settings = QSettings("StreamInspector", "StreamInspector")
+        key = f"startup_notice/{__version__}"
+        if not force and settings.value(key, False, type=bool):
+            return
+        QMessageBox.information(
+            self,
+            "Inicio de StreamInspector",
+            "En Windows inicia siempre la aplicación mediante "
+            "'Iniciar StreamInspector.bat'.\n\n"
+            "El lanzador detecta Python, repara un entorno .venv incompleto, "
+            "instala PySide6 y actualiza las dependencias automáticamente.",
+        )
+        settings.setValue(key, True)
 
     def _append_flow(self, event: HttpFlowCaptured) -> None:
         sorting = self.history.isSortingEnabled()
@@ -89,7 +119,6 @@ class AdvancedMainWindow(SessionMainWindow):
             return
         request_headers = _format_headers(flow.request_headers)
         response_headers = _format_headers(flow.response_headers)
-        request_body = _decode_body(flow.request_body)
         response_body = _decode_body(flow.response_body)
         self.request_view.setPlainText(format_request(flow))
         self.response_view.setPlainText(
@@ -109,6 +138,8 @@ class AdvancedMainWindow(SessionMainWindow):
         menu = QMenu(self)
         replay_action = menu.addAction("Repetir petición…")
         replay_action.triggered.connect(lambda: self._open_replay_dialog(flow))
+        compare_action = menu.addAction("Comparar capturas…")
+        compare_action.triggered.connect(self._compare_flows)
         menu.addSeparator()
         actions = (
             ("Copiar URL", flow.url),
@@ -136,6 +167,18 @@ class AdvancedMainWindow(SessionMainWindow):
         dialog = ReplayDialog(flow, self)
         self._replay_dialogs.append(dialog)
         dialog.finished.connect(lambda: self._replay_dialogs.remove(dialog))
+        dialog.show()
+
+    def _compare_flows(self) -> None:
+        flows = self._visible_flows()
+        if len(flows) < 2:
+            QMessageBox.information(
+                self, "Comparar capturas", "Se necesitan al menos dos capturas visibles."
+            )
+            return
+        dialog = CompareDialog(flows, self)
+        self._compare_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._compare_dialogs.remove(dialog))
         dialog.show()
 
     def _visible_flows(self) -> list[HttpFlowCaptured]:
