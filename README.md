@@ -1,43 +1,121 @@
 # StreamInspector
 
-Aplicación de escritorio para inspección y depuración **autorizada** de tráfico web y APIs.
+Aplicación de escritorio para inspeccionar, analizar y repetir tráfico HTTP/HTTPS en sistemas propios o expresamente autorizados.
 
-## Inicio automático en Windows
+## Inicio rápido en Windows
 
-No ejecutes directamente `src/streaminspector/main.py`, porque ese archivo presupone que las dependencias ya están instaladas.
-
-Haz doble clic en:
+1. Descarga o clona el repositorio.
+2. Abre la carpeta del proyecto.
+3. Haz doble clic en:
 
 ```text
 Iniciar StreamInspector.bat
 ```
 
-El lanzador realiza automáticamente estas operaciones:
+El lanzador busca un Python compatible, puede instalar Python 3.12 mediante `winget`, crea o repara `.venv`, instala PySide6 y el resto de dependencias, y finalmente inicia la aplicación.
 
-1. Comprueba Python 3.12 o superior.
-2. Crea `.venv` si todavía no existe.
-3. Instala o actualiza PySide6, mitmproxy, SQLAlchemy y el resto de dependencias.
-4. Reinstala el proyecto cuando cambia `pyproject.toml`.
-5. Inicia StreamInspector usando el Python del entorno virtual.
+No ejecutes directamente `src/streaminspector/main.py` salvo que hayas preparado previamente el entorno de desarrollo.
 
-También puede iniciarse desde una consola:
+## Primera captura paso a paso
 
-```powershell
-py -3.12 bootstrap.py
+1. Inicia StreamInspector con `Iniciar StreamInspector.bat`.
+2. Pulsa el botón `Proxy OFF`.
+3. Cuando el motor esté preparado, el botón cambiará a `Proxy ON`.
+4. De forma predeterminada el proxy escucha en `127.0.0.1:8080`.
+5. En Windows, deja marcada `Proxy > Configurar automáticamente el proxy de Windows` para que StreamInspector aplique y restaure la configuración del sistema.
+6. Abre una web o API propia. Las solicitudes aparecerán en la tabla principal.
+7. Selecciona una fila para revisar petición, respuesta, cabeceras, cuerpo y contenido JSON.
+8. Para detenerlo, pulsa `Proxy ON`; volverá a `Proxy OFF` y se restaurará el proxy anterior de Windows.
+
+No es necesario definir manualmente `STREAMINSPECTOR_PROXY__HOST` ni `STREAMINSPECTOR_PROXY__PORT`.
+
+## Capturar HTTPS
+
+1. Activa el proxy.
+2. Abre `Proxy > Configurar navegador y HTTPS…`.
+3. Pulsa `Abrir mitm.it`.
+4. Descarga el certificado correspondiente al sistema operativo.
+5. Instálalo como entidad de certificación raíz únicamente en un equipo o perfil de prueba autorizado.
+6. Abre una web HTTPS y comprueba que aparece en StreamInspector.
+
+La aplicación también permite abrir la carpeta de certificados de mitmproxy y comprobar si ya existen.
+
+## Configurar host y puerto
+
+Abre:
+
+```text
+Proxy > Configurar host y puerto…
 ```
 
-## Funciones actuales
+El valor predeterminado es `127.0.0.1:8080`. Detén el proxy antes de cambiarlo. Usa `Proxy > Diagnosticar configuración…` para comprobar si el puerto está disponible.
 
-- GUI PySide6 con tema oscuro.
-- Proxy local basado en mitmproxy.
-- Captura HTTP/HTTPS para entornos autorizados.
-- Persistencia SQLite y sesiones históricas.
-- Inspector de petición, respuesta, cabeceras, cuerpo y JSON.
-- Filtros combinables y ordenación por columnas.
-- Exportación CSV, JSON y HAR 1.2.
-- Menú contextual para copiar datos de una captura.
-- Compositor para editar y repetir una petición seleccionada.
-- Pruebas con pytest, lint con Ruff y CI de GitHub Actions.
+## Captura selectiva
+
+En el menú `Captura` puedes:
+
+- pausar y reanudar la captura sin detener el proxy;
+- omitir imágenes, CSS, JavaScript, fuentes, audio y vídeo;
+- excluir dominios y todos sus subdominios;
+- consultar la política de captura activa.
+
+El tráfico omitido no se muestra ni se guarda en SQLite.
+
+## Buscar y filtrar
+
+La barra superior permite combinar:
+
+- texto libre;
+- dominio;
+- método HTTP;
+- familia de estado;
+- tipo de contenido.
+
+La tabla puede ordenarse pulsando las cabeceras. Las exportaciones y análisis trabajan con las filas visibles.
+
+## Inspeccionar, copiar y repetir
+
+Selecciona una captura para ver sus detalles. Con el botón derecho puedes copiar la URL, cabeceras, cuerpos o la petición completa.
+
+Desde `Peticiones` puedes:
+
+- editar y repetir una solicitud;
+- comparar dos capturas y revisar sus diferencias.
+
+Repite solicitudes únicamente contra sistemas autorizados.
+
+## Sesiones e historial
+
+Cada ejecución crea una sesión. El panel lateral permite abrir, renombrar y eliminar sesiones históricas. Las capturas se guardan localmente en SQLite.
+
+## Exportar y analizar
+
+El menú `Exportar` genera:
+
+- CSV;
+- JSON;
+- HAR 1.2.
+
+El menú `Análisis` muestra métricas de rendimiento, errores, tiempos de respuesta, tamaños, dominios y familias de estado.
+
+## Asistente integrado
+
+En la primera ejecución se abre una guía. También puede abrirse desde:
+
+```text
+Ayuda > Primeros pasos y diagnóstico…
+```
+
+Incluye instrucciones y un informe local con Python, sistema operativo, proxy, certificados y directorio de datos.
+
+## Actualizar una copia existente
+
+```powershell
+git switch main
+git pull
+```
+
+Después vuelve a ejecutar `Iniciar StreamInspector.bat`; el lanzador actualizará las dependencias cuando sea necesario.
 
 ## Instalación de desarrollo
 
@@ -46,42 +124,38 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
-```
-
-Después:
-
-```powershell
 python -m streaminspector.main
 ```
 
-## Primera captura
-
-1. Inicia StreamInspector con el lanzador automático.
-2. Pulsa `Proxy OFF`; cambiará a `Proxy ON` cuando el motor esté escuchando.
-3. Configura temporalmente el proxy HTTP/HTTPS del navegador como `127.0.0.1:8080`.
-4. Navega por un sistema propio o autorizado.
-5. Las respuestas capturadas aparecerán en la tabla.
-
-Para HTTPS será necesario instalar el certificado generado por mitmproxy. Con el proxy activo, abre `http://mitm.it` en el navegador configurado y sigue las instrucciones del sistema operativo. Instálalo únicamente en equipos y perfiles de prueba controlados.
-
-## Repetir una petición
-
-Selecciona una captura y usa `Peticiones > Repetir petición seleccionada…` o el menú contextual. Puedes modificar método, URL, cabeceras y cuerpo antes de enviarla. La operación se ejecuta en un hilo separado para no bloquear la interfaz.
-
-## Configuración del proxy
+Pruebas y lint:
 
 ```powershell
-$env:STREAMINSPECTOR_PROXY__HOST = "127.0.0.1"
-$env:STREAMINSPECTOR_PROXY__PORT = "8080"
-```
-
-## Pruebas y calidad
-
-```bash
 pytest
 ruff check .
 ```
 
+## Problemas frecuentes
+
+### `ModuleNotFoundError: No module named 'PySide6'`
+
+Estás usando un Python sin las dependencias. Ejecuta `Iniciar StreamInspector.bat`.
+
+### `No pyvenv.cfg file`
+
+El entorno virtual quedó incompleto. El lanzador actual lo detecta, elimina y reconstruye automáticamente.
+
+### El puerto 8080 está ocupado
+
+Detén el programa que lo utiliza o cambia el puerto desde `Proxy > Configurar host y puerto…`.
+
+### No aparece tráfico HTTPS
+
+Comprueba que el proxy está activo, que el navegador usa el proxy y que el certificado de mitmproxy está instalado en el perfil de prueba.
+
+### Internet queda sin conexión al cerrar
+
+Abre de nuevo StreamInspector y apaga el proxy correctamente. La aplicación restaura automáticamente la configuración anterior de Windows al detenerse o cerrarse.
+
 ## Uso responsable
 
-Utiliza StreamInspector únicamente sobre sistemas propios o cuando dispongas de autorización expresa para inspeccionar o repetir el tráfico.
+StreamInspector puede mostrar credenciales, cookies, tokens y otros datos sensibles presentes en el tráfico. Utilízalo únicamente con autorización expresa, protege las exportaciones y elimina las sesiones cuando ya no sean necesarias.
