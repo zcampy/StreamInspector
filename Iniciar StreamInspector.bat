@@ -2,6 +2,7 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+rem Use an already installed compatible Python, regardless of launcher configuration.
 call :try_python py -3.13
 if not errorlevel 1 exit /b 0
 call :try_python py -3.12
@@ -19,9 +20,10 @@ echo [StreamInspector] Instalando Python 3.12 automaticamente...
 winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements --scope user
 if errorlevel 1 goto :install_failed
 
+rem Winget may not refresh PATH in this window, so try known locations first.
 if exist "%LocalAppData%\Programs\Python\Python312\python.exe" (
     "%LocalAppData%\Programs\Python\Python312\python.exe" bootstrap.py
-    exit /b %errorlevel%
+    if not errorlevel 1 exit /b 0
 )
 call :try_python py -3.12
 if not errorlevel 1 exit /b 0
