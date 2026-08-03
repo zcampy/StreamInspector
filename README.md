@@ -106,6 +106,34 @@ El menú `Organizar` permite:
 
 Las anotaciones de capturas guardadas se conservan en SQLite y reaparecen al abrir sesiones históricas. Las capturas favoritas se identifican con una estrella en la tabla.
 
+## Prueba de concepto automática
+
+Después de preparar el entorno, ejecuta:
+
+```powershell
+.\.venv\Scripts\python.exe -m streaminspector.poc
+```
+
+La POC realiza sin conectarse a servicios externos:
+
+1. genera un HAR de ejemplo;
+2. lo convierte en una captura;
+3. guarda la captura en una base SQLite temporal;
+4. añade favorito, etiquetas y nota;
+5. cierra y vuelve a abrir la base;
+6. comprueba que la captura y sus anotaciones persisten.
+
+El resultado correcto termina con:
+
+```text
+[POC] CORRECTO
+[POC] HAR importado: 1 captura
+[POC] Persistencia SQLite: correcta
+[POC] Favorito, etiquetas y nota: correctos
+```
+
+Esta misma POC se ejecuta en GitHub Actions mediante `tests/test_poc.py`.
+
 ## Exportar y analizar
 
 El menú `Exportar` genera:
