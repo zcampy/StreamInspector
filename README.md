@@ -4,14 +4,18 @@ Aplicación de escritorio para inspección y depuración **autorizada** de tráf
 
 ## Estado
 
-`0.1.0-alpha.1` — base ejecutable del proyecto:
+`0.1.0-alpha.2` — primera versión funcional del motor de captura:
 
-- GUI inicial con PySide6 y tema oscuro.
+- GUI PySide6 con tema oscuro.
 - EventBus tipado y thread-safe.
 - Configuración mediante Pydantic Settings.
 - Logs rotativos.
-- Estructura `src/` y pruebas con pytest.
-- Punto de extensión preparado para integrar mitmproxy en la siguiente fase.
+- Proxy local basado en mitmproxy ejecutado en un hilo dedicado.
+- Inicio y parada del proxy desde la barra de herramientas.
+- Historial HTTP actualizado en tiempo real.
+- Árbol de dominios de la sesión actual.
+- Integración segura entre el hilo del proxy y el hilo de Qt.
+- Pruebas con pytest, lint con Ruff y CI de GitHub Actions.
 
 ## Requisitos
 
@@ -44,6 +48,23 @@ También puede iniciarse con:
 python -m streaminspector.main
 ```
 
+## Primera captura
+
+1. Inicia StreamInspector.
+2. Pulsa `Proxy OFF`; cambiará a `Proxy ON` cuando el motor esté escuchando.
+3. Configura temporalmente el proxy HTTP/HTTPS del navegador como `127.0.0.1:8080`.
+4. Navega por un sistema propio o autorizado.
+5. Las respuestas capturadas aparecerán en la tabla.
+
+Para HTTPS será necesario instalar el certificado generado por mitmproxy. Con el proxy activo, abre `http://mitm.it` en el navegador configurado y sigue las instrucciones del sistema operativo. Instálalo únicamente en equipos y perfiles de prueba controlados.
+
+El host y puerto pueden cambiarse con variables de entorno:
+
+```powershell
+$env:STREAMINSPECTOR_PROXY__HOST = "127.0.0.1"
+$env:STREAMINSPECTOR_PROXY__PORT = "8080"
+```
+
 ## Pruebas y calidad
 
 ```bash
@@ -53,7 +74,7 @@ ruff check .
 
 ## Próxima fase
 
-Integración del motor proxy local con mitmproxy, emisión de eventos HTTP hacia la GUI y captura de metadatos de peticiones y respuestas.
+Persistencia SQLite de sesiones y cuerpos, selección de filas y visor real de petición/respuesta.
 
 ## Uso responsable
 

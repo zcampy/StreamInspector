@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from threading import RLock
-from typing import Any, TypeVar
+from typing import TypeVar
 
 EventHandler = Callable[["Event"], None]
 TEvent = TypeVar("TEvent", bound="Event")
@@ -25,6 +25,42 @@ class ApplicationStarted(Event):
 class StatusMessage(Event):
     message: str = ""
     level: str = "info"
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyStartRequested(Event):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyStopRequested(Event):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyStateChanged(Event):
+    running: bool = False
+    host: str = ""
+    port: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyError(Event):
+    message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class HttpFlowCaptured(Event):
+    flow_id: str = ""
+    method: str = ""
+    scheme: str = ""
+    host: str = ""
+    port: int = 0
+    path: str = ""
+    status_code: int | None = None
+    content_type: str = ""
+    response_size: int = 0
+    duration_ms: float | None = None
 
 
 class EventBus:
