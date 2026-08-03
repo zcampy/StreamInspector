@@ -9,14 +9,9 @@ from streaminspector.core.events import (
 from streaminspector.storage import StorageService
 
 
-def test_storage_persists_restores_and_deletes_flow(tmp_path: Path) -> None:
-    event_bus = EventBus()
-    storage = StorageService(event_bus, tmp_path / "sessions.sqlite3")
-    deleted_events: list[StoredHistoryDeleted] = []
-    event_bus.subscribe(StoredHistoryDeleted, deleted_events.append)
-
-    original = HttpFlowCaptured(
-        flow_id="flow-1",
+def _flow(flow_id: str = "flow-1") -> HttpFlowCaptured:
+    return HttpFlowCaptured(
+        flow_id=flow_id,
         method="GET",
         scheme="https",
         host="example.com",
@@ -33,6 +28,15 @@ def test_storage_persists_restores_and_deletes_flow(tmp_path: Path) -> None:
         response_body=b'{"ok": true}',
         response_size=12,
     )
+
+
+def test_storage_persists_restores_and_deletes_flow(tmp_path: Path) -> None:
+    event_bus = EventBus()
+    storage = StorageService(event_bus, tmp_path / "sessions.sqlite3")
+    deleted_events: list[StoredHistoryDeleted] = []
+    event_bus.subscribe(StoredHistoryDeleted, deleted_events.append)
+
+    original = _flow()
     event_bus.publish(original)
 
     restored = storage.recent_events()
@@ -45,4 +49,24 @@ def test_storage_persists_restores_and_deletes_flow(tmp_path: Path) -> None:
     event_bus.publish(StoredHistoryDeleteRequested())
     assert storage.recent_events() == []
     assert deleted_events[0].deleted_count == 1
+    storage.close()
+
+
+def test_storage_groups_flows_by_capture_session(tmp_path: Path) -> None:
+    event_bus = EventBus()
+    storage = StorageService(event_bus, tmp_path / "sessions.sqlite3")
+    active_session_id = storage.active_session_id
+
+    event_bus.publish(_flow("flow-session-1"))
+
+    sessions = storage.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].id == active_session_id
+    assert sessions[0].flow_count == 1
+
+    session_flows = storage.session_events(active_session_id)
+    assert [flow.flow_id for flow in session_flows] == ["flow-session-1"]
+
+    storage.rename_session(active_session_id, "Prueba API")
+    assert storage.list_sessions()[0].name == "Prueba API"
     storage.close()
