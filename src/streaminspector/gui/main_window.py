@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -31,6 +32,8 @@ from streaminspector.core.events import (
     ProxyStateChanged,
     ProxyStopRequested,
     StatusMessage,
+    StoredHistoryDeleted,
+    StoredHistoryDeleteRequested,
 )
 
 
@@ -39,10 +42,15 @@ class _QtEventBridge(QObject):
     proxy_state = Signal(object)
     proxy_error = Signal(object)
     flow = Signal(object)
+    history_deleted = Signal(object)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, event_bus: EventBus) -> None:
+    def __init__(
+        self,
+        event_bus: EventBus,
+        initial_flows: list[HttpFlowCaptured] | None = None,
+    ) -> None:
         super().__init__()
         self._event_bus = event_bus
         self._domains: dict[str, QTreeWidgetItem] = {}
@@ -52,6 +60,7 @@ class MainWindow(QMainWindow):
         self._bridge.proxy_state.connect(self._on_proxy_state_changed)
         self._bridge.proxy_error.connect(self._on_proxy_error)
         self._bridge.flow.connect(self._on_flow_captured)
+        self._bridge.history_deleted.connect(self._on_stored_history_deleted)
 
         self.setWindowTitle("StreamInspector Pro — 0.1 Alpha")
         self.resize(1380, 820)
@@ -61,23 +70,30 @@ class MainWindow(QMainWindow):
         self._build_domain_dock()
         self._build_status_bar()
         self._subscribe_events()
+        self._restore_initial_flows(initial_flows or [])
 
     def _subscribe_events(self) -> None:
         self._event_bus.subscribe(StatusMessage, self._bridge.status.emit)
         self._event_bus.subscribe(ProxyStateChanged, self._bridge.proxy_state.emit)
         self._event_bus.subscribe(ProxyError, self._bridge.proxy_error.emit)
         self._event_bus.subscribe(HttpFlowCaptured, self._bridge.flow.emit)
+        self._event_bus.subscribe(StoredHistoryDeleted, self._bridge.history_deleted.emit)
 
     def _build_actions(self) -> None:
         self.action_exit = QAction("Salir", self)
         self.action_exit.triggered.connect(self.close)
-        self.action_clear = QAction("Limpiar historial", self)
-        self.action_clear.triggered.connect(self._clear_history)
+
+        self.action_clear_view = QAction("Limpiar vista", self)
+        self.action_clear_view.triggered.connect(self._clear_view)
+
+        self.action_delete_history = QAction("Borrar historial guardado…", self)
+        self.action_delete_history.triggered.connect(self._request_delete_stored_history)
 
         file_menu = self.menuBar().addMenu("Archivo")
         file_menu.addAction(self.action_exit)
         tools_menu = self.menuBar().addMenu("Herramientas")
-        tools_menu.addAction(self.action_clear)
+        tools_menu.addAction(self.action_clear_view)
+        tools_menu.addAction(self.action_delete_history)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Navegación", self)
@@ -149,6 +165,12 @@ class MainWindow(QMainWindow):
         status.showMessage("Preparado — activa el proxy para comenzar")
         self.setStatusBar(status)
 
+    def _restore_initial_flows(self, flows: list[HttpFlowCaptured]) -> None:
+        for flow in flows:
+            self._append_flow(flow)
+        if flows:
+            self.statusBar().showMessage(f"Restauradas {len(flows)} capturas guardadas")
+
     def _open_requested_url(self) -> None:
         url = self.url_edit.text().strip()
         if not url:
@@ -164,13 +186,26 @@ class MainWindow(QMainWindow):
         event = ProxyStartRequested() if enabled else ProxyStopRequested()
         self._event_bus.publish(event)
 
-    def _clear_history(self) -> None:
+    def _clear_view(self) -> None:
         self.history.setRowCount(0)
         self._flows.clear()
         self._reset_domain_tree()
         for editor in self._detail_editors():
             editor.clear()
-        self._event_bus.publish(StatusMessage(message="Historial limpiado"))
+        self._event_bus.publish(
+            StatusMessage(message="Vista limpiada; el historial guardado no se ha eliminado")
+        )
+
+    def _request_delete_stored_history(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Borrar historial guardado",
+            "Se eliminarán permanentemente todas las capturas almacenadas. ¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._event_bus.publish(StoredHistoryDeleteRequested())
 
     def _reset_domain_tree(self) -> None:
         self.domain_tree.clear()
@@ -215,6 +250,17 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_flow_captured(self, event: HttpFlowCaptured) -> None:
+        self._append_flow(event)
+
+    @Slot(object)
+    def _on_stored_history_deleted(self, event: StoredHistoryDeleted) -> None:
+        self._clear_view()
+        self.statusBar().showMessage(
+            f"Historial guardado eliminado: {event.deleted_count} capturas",
+            8000,
+        )
+
+    def _append_flow(self, event: HttpFlowCaptured) -> None:
         row = self.history.rowCount()
         self._flows.append(event)
         self.history.insertRow(row)
