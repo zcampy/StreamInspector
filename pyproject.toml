@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "streaminspector"
+version = "0.1.0a1"
+description = "Desktop HTTP inspection workbench for authorized debugging"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "StreamInspector contributors" }]
+dependencies = [
+  "PySide6>=6.8,<7",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5,<3",
+  "platformdirs>=4.3,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.8,<1",
+]
+proxy = ["mitmproxy>=11,<12"]
+
+[project.scripts]
+streaminspector = "streaminspector.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/streaminspector"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
