@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QAction, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QAction, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QPlainTextEdit
 
 from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
@@ -93,6 +93,7 @@ class DeepSearchWindow(AnnotationWindow):
 
     def _apply_deep_search(self) -> None:
         by_id = {flow.flow_id: flow for flow in self._flows}
+        favorites = self._storage.favorite_flow_ids()
         visible = 0
         for row in range(self.history.rowCount()):
             item = self.history.item(row, 0)
@@ -104,10 +105,7 @@ class DeepSearchWindow(AnnotationWindow):
                 scope=self._deep_scope,
                 case_sensitive=self._case_sensitive,
             )
-            favorite_hidden = (
-                self.only_favorites_action.isChecked()
-                and flow_id not in self._storage.favorite_flow_ids()
-            )
+            favorite_hidden = self.only_favorites_action.isChecked() and flow_id not in favorites
             self.history.setRowHidden(row, not matched or favorite_hidden)
             if matched and not favorite_hidden:
                 visible += 1
@@ -142,7 +140,11 @@ class DeepSearchWindow(AnnotationWindow):
         document = editor.document()
         cursor = QTextCursor(document)
         selections: list[QPlainTextEdit.ExtraSelection] = []
-        options = QTextDocument.FindFlag.FindCaseSensitively if case_sensitive else QTextDocument.FindFlag(0)
+        options = (
+            QTextDocument.FindFlag.FindCaseSensitively
+            if case_sensitive
+            else QTextDocument.FindFlag(0)
+        )
         while True:
             cursor = document.find(query, cursor, options)
             if cursor.isNull():
