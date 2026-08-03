@@ -88,6 +88,24 @@ Repite solicitudes únicamente contra sistemas autorizados.
 
 Cada ejecución crea una sesión. El panel lateral permite abrir, renombrar y eliminar sesiones históricas. Las capturas se guardan localmente en SQLite.
 
+## Importar archivos HAR
+
+Abre `Importar > Archivo HAR…` para analizar archivos generados por Chrome, Edge, Firefox, DevTools, Postman u otras herramientas compatibles.
+
+El HAR se abre como una vista temporal y no se mezcla automáticamente con la sesión activa ni con SQLite. Puede filtrarse, compararse, analizarse y exportarse desde StreamInspector.
+
+## Organizar capturas
+
+El menú `Organizar` permite:
+
+- marcar o desmarcar una captura como favorita;
+- añadir etiquetas separadas por comas;
+- guardar una nota de análisis;
+- consultar la anotación completa;
+- mostrar únicamente las capturas favoritas.
+
+Las anotaciones de capturas guardadas se conservan en SQLite y reaparecen al abrir sesiones históricas. Las capturas favoritas se identifican con una estrella en la tabla.
+
 ## Exportar y analizar
 
 El menú `Exportar` genera:
