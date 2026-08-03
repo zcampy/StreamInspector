@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from streaminspector.core.events import (
     EventBus,
     HttpFlowCaptured,
@@ -69,4 +71,17 @@ def test_storage_groups_flows_by_capture_session(tmp_path: Path) -> None:
 
     storage.rename_session(active_session_id, "Prueba API")
     assert storage.list_sessions()[0].name == "Prueba API"
+    storage.close()
+
+
+def test_storage_deletes_only_inactive_session(tmp_path: Path) -> None:
+    event_bus = EventBus()
+    storage = StorageService(event_bus, tmp_path / "sessions.sqlite3")
+    disposable_id = storage.create_session("Descartable")
+
+    assert storage.delete_session(disposable_id) == 0
+    assert all(item.id != disposable_id for item in storage.list_sessions())
+
+    with pytest.raises(ValueError, match="activa"):
+        storage.delete_session(storage.active_session_id)
     storage.close()
