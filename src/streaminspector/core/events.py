@@ -57,8 +57,15 @@ class HttpFlowCaptured(Event):
     host: str = ""
     port: int = 0
     path: str = ""
+    url: str = ""
+    http_version: str = ""
     status_code: int | None = None
+    reason: str = ""
     content_type: str = ""
+    request_headers: tuple[tuple[str, str], ...] = ()
+    response_headers: tuple[tuple[str, str], ...] = ()
+    request_body: bytes = b""
+    response_body: bytes = b""
     response_size: int = 0
     duration_ms: float | None = None
 
