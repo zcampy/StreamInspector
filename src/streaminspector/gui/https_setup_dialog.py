@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -104,7 +104,8 @@ class HttpsSetupDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Proxy detenido",
-                "Activa primero Proxy ON. mitm.it solo funciona cuando el tráfico pasa por el proxy.",
+                "Activa primero Proxy ON. mitm.it solo funciona cuando el tráfico "
+                "pasa por el proxy.",
             )
             return
         webbrowser.open("http://mitm.it")
