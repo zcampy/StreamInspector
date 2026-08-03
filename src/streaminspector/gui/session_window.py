@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget
+from PySide6.QtWidgets import QDockWidget, QVBoxLayout, QWidget
 
 from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
 from streaminspector.gui.main_window import MainWindow
 from streaminspector.gui.session_panel import SessionPanel
+from streaminspector.gui.traffic_filters import TrafficFilterBar
 from streaminspector.storage import SessionSummary, StorageService
 
 
 class SessionMainWindow(MainWindow):
-    """Main window extended with persisted capture-session navigation."""
+    """Main window extended with session navigation and traffic filters."""
 
     def __init__(
         self,
@@ -21,7 +22,18 @@ class SessionMainWindow(MainWindow):
         self._storage = storage
         self._visible_session_id: int | None = None
         super().__init__(event_bus, initial_flows=initial_flows)
+        self._install_filter_bar()
         self._build_sessions_dock()
+
+    def _install_filter_bar(self) -> None:
+        content = self.takeCentralWidget()
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.filter_bar = TrafficFilterBar(self.history, lambda: self._flows, container)
+        layout.addWidget(self.filter_bar)
+        layout.addWidget(content, 1)
+        self.setCentralWidget(container)
 
     def _build_sessions_dock(self) -> None:
         dock = QDockWidget("Sesiones", self)
@@ -40,11 +52,22 @@ class SessionMainWindow(MainWindow):
         self._domain_root.setText(0, summary.name)
         for flow in flows:
             self._append_flow(flow)
+        self.filter_bar.refresh_options()
         self._event_bus.publish(
             StatusMessage(
                 message=f"Sesión abierta: {summary.name} ({len(flows)} capturas)"
             )
         )
+
+    def _append_flow(self, event: HttpFlowCaptured) -> None:
+        super()._append_flow(event)
+        if hasattr(self, "filter_bar"):
+            self.filter_bar.refresh_options()
+
+    def _clear_view(self) -> None:
+        super()._clear_view()
+        if hasattr(self, "filter_bar"):
+            self.filter_bar.refresh_options()
 
     def _on_flow_captured(self, event: HttpFlowCaptured) -> None:
         if self._visible_session_id not in (None, self._storage.active_session_id):
