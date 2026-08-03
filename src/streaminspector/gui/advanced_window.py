@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSettings, QTimer, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
@@ -20,6 +20,7 @@ from streaminspector.gui.main_window import (
     _format_headers,
     _pretty_json,
 )
+from streaminspector.gui.performance_dialog import PerformanceDialog
 from streaminspector.gui.replay_dialog import ReplayDialog
 from streaminspector.gui.session_window import SessionMainWindow
 from streaminspector.storage import StorageService
@@ -39,6 +40,7 @@ class AdvancedMainWindow(SessionMainWindow):
         super().__init__(event_bus, storage, initial_flows=initial_flows)
         self._replay_dialogs: list[ReplayDialog] = []
         self._compare_dialogs: list[CompareDialog] = []
+        self._performance_dialogs: list[PerformanceDialog] = []
         self._install_advanced_actions()
         self.statusBar().showMessage(
             "Inicio recomendado en Windows: Iniciar StreamInspector.bat", 12000
@@ -57,6 +59,11 @@ class AdvancedMainWindow(SessionMainWindow):
         compare_action = QAction("Comparar capturas…", self)
         compare_action.triggered.connect(self._compare_flows)
         tools_menu.addAction(compare_action)
+
+        analysis_menu = self.menuBar().addMenu("Análisis")
+        performance_action = QAction("Rendimiento de la sesión…", self)
+        performance_action.triggered.connect(self._show_performance)
+        analysis_menu.addAction(performance_action)
 
         help_menu = self.menuBar().addMenu("Ayuda")
         startup_action = QAction("Cómo iniciar StreamInspector", self)
@@ -179,6 +186,18 @@ class AdvancedMainWindow(SessionMainWindow):
         dialog = CompareDialog(flows, self)
         self._compare_dialogs.append(dialog)
         dialog.finished.connect(lambda: self._compare_dialogs.remove(dialog))
+        dialog.show()
+
+    def _show_performance(self) -> None:
+        flows = self._visible_flows()
+        if not flows:
+            QMessageBox.information(
+                self, "Rendimiento", "No hay capturas visibles para analizar."
+            )
+            return
+        dialog = PerformanceDialog(flows, self)
+        self._performance_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._performance_dialogs.remove(dialog))
         dialog.show()
 
     def _visible_flows(self) -> list[HttpFlowCaptured]:
