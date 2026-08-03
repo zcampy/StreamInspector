@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from platformdirs import user_config_dir, user_data_dir, user_log_dir
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from platformdirs import user_config_dir, user_data_dir, user_log_dir
 
 APP_NAME = "StreamInspector"
 APP_AUTHOR = "StreamInspector"
