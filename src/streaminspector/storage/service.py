@@ -21,6 +21,7 @@ from streaminspector.storage.models import (
     Base,
     CapturedFlow,
     CaptureSession,
+    FlowAnnotation,
     FlowSessionLink,
 )
 
@@ -34,6 +35,13 @@ class SessionSummary:
     started_at: datetime
     ended_at: datetime | None
     flow_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class FlowAnnotationData:
+    favorite: bool = False
+    tags: str = ""
+    note: str = ""
 
 
 class StorageService:
@@ -95,25 +103,30 @@ class StorageService:
         if session_id == self._active_session_id:
             raise ValueError("La sesión activa no se puede eliminar")
         with self._session_factory() as session:
-            flow_ids = list(
+            flow_pks = list(
                 session.scalars(
                     select(FlowSessionLink.flow_pk).where(
                         FlowSessionLink.session_id == session_id
                     )
                 )
             )
+            flow_ids = list(
+                session.scalars(select(CapturedFlow.flow_id).where(CapturedFlow.id.in_(flow_pks)))
+            )
             session.execute(
                 delete(FlowSessionLink).where(FlowSessionLink.session_id == session_id)
             )
+            if flow_pks:
+                session.execute(delete(CapturedFlow).where(CapturedFlow.id.in_(flow_pks)))
             if flow_ids:
-                session.execute(delete(CapturedFlow).where(CapturedFlow.id.in_(flow_ids)))
+                session.execute(delete(FlowAnnotation).where(FlowAnnotation.flow_id.in_(flow_ids)))
             result = session.execute(
                 delete(CaptureSession).where(CaptureSession.id == session_id)
             )
             if result.rowcount == 0:
                 raise ValueError("La sesión no existe")
             session.commit()
-            return len(flow_ids)
+            return len(flow_pks)
 
     def end_session(self, session_id: int) -> None:
         with self._session_factory() as session:
@@ -170,6 +183,46 @@ class StorageService:
             flows = list(reversed(session.scalars(statement).all()))
         return [self._to_event(flow) for flow in flows]
 
+    def get_annotation(self, flow_id: str) -> FlowAnnotationData:
+        with self._session_factory() as session:
+            model = session.get(FlowAnnotation, flow_id)
+            if model is None:
+                return FlowAnnotationData()
+            return FlowAnnotationData(
+                favorite=model.favorite,
+                tags=model.tags,
+                note=model.note,
+            )
+
+    def save_annotation(
+        self,
+        flow_id: str,
+        *,
+        favorite: bool,
+        tags: str,
+        note: str,
+    ) -> None:
+        clean_tags = ", ".join(
+            dict.fromkeys(tag.strip() for tag in tags.split(",") if tag.strip())
+        )
+        with self._session_factory() as session:
+            model = session.get(FlowAnnotation, flow_id)
+            if model is None:
+                model = FlowAnnotation(flow_id=flow_id)
+                session.add(model)
+            model.favorite = favorite
+            model.tags = clean_tags
+            model.note = note.strip()
+            session.commit()
+
+    def favorite_flow_ids(self) -> set[str]:
+        with self._session_factory() as session:
+            return set(
+                session.scalars(
+                    select(FlowAnnotation.flow_id).where(FlowAnnotation.favorite.is_(True))
+                )
+            )
+
     def _store_flow(self, event: HttpFlowCaptured) -> None:
         if not self._capture_filter(event):
             return
@@ -211,6 +264,7 @@ class StorageService:
         try:
             with self._session_factory() as session:
                 deleted_count = session.scalar(select(func.count(CapturedFlow.id))) or 0
+                session.execute(delete(FlowAnnotation))
                 session.execute(delete(FlowSessionLink))
                 session.execute(delete(CapturedFlow))
                 session.execute(
