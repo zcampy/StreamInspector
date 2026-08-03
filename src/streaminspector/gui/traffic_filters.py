@@ -41,7 +41,18 @@ class TrafficFilterBar(QWidget):
         self.type_filter = QComboBox()
         self.result_label = QLabel("0 de 0")
 
-        self.method_filter.addItems(["Todos", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        self.method_filter.addItems(
+            [
+                "Todos",
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "HEAD",
+                "OPTIONS",
+            ]
+        )
         self.status_filter.addItems(["Todos", "2xx", "3xx", "4xx", "5xx", "Sin respuesta"])
         self.type_filter.addItems(
             ["Todos", "JSON", "HTML", "JavaScript", "CSS", "Imagen", "Audio/Vídeo", "Otro"]
