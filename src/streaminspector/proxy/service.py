@@ -39,10 +39,14 @@ class ProxyService:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def start(self) -> None:
+    def start(self, host: str | None = None, port: int | None = None) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            if host is not None:
+                self._settings.host = host
+            if port is not None:
+                self._settings.port = port
             self._thread = Thread(
                 target=self._thread_main,
                 name="streaminspector-proxy",
@@ -63,8 +67,8 @@ class ProxyService:
         if thread is not None:
             thread.join(timeout=5)
 
-    def _on_start_requested(self, _event: ProxyStartRequested) -> None:
-        self.start()
+    def _on_start_requested(self, event: ProxyStartRequested) -> None:
+        self.start(event.host, event.port)
 
     def _on_stop_requested(self, _event: ProxyStopRequested) -> None:
         self.stop()

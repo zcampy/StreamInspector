@@ -9,7 +9,7 @@ from streaminspector import __version__
 from streaminspector.core.config import AppSettings
 from streaminspector.core.events import ApplicationStarted, EventBus
 from streaminspector.core.logging import configure_logging
-from streaminspector.gui.advanced_window import AdvancedMainWindow
+from streaminspector.gui.proxy_window import ProxyConfiguredWindow
 from streaminspector.gui.theme import DARK_STYLESHEET
 from streaminspector.proxy import ProxyService
 from streaminspector.storage import StorageService
@@ -17,7 +17,7 @@ from streaminspector.storage import StorageService
 
 def build_application() -> tuple[
     QApplication,
-    AdvancedMainWindow,
+    ProxyConfiguredWindow,
     EventBus,
     ProxyService,
     StorageService,
@@ -42,7 +42,7 @@ def build_application() -> tuple[
     app.aboutToQuit.connect(storage_service.close)
 
     initial_flows = storage_service.recent_events(limit=500)
-    window = AdvancedMainWindow(
+    window = ProxyConfiguredWindow(
         event_bus,
         storage_service,
         initial_flows=initial_flows,

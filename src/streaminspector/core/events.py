@@ -29,7 +29,8 @@ class StatusMessage(Event):
 
 @dataclass(frozen=True, slots=True)
 class ProxyStartRequested(Event):
-    pass
+    host: str = "127.0.0.1"
+    port: int = 8080
 
 
 @dataclass(frozen=True, slots=True)
