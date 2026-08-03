@@ -103,8 +103,6 @@ class ProxyService:
         proxy_options = options.Options(
             listen_host=self._settings.host,
             listen_port=self._settings.port,
-            termlog_verbosity="warn",
-            flow_detail=0,
         )
         master = DumpMaster(proxy_options, with_termlog=False, with_dumper=False)
         master.addons.add(CaptureAddon(self._event_bus))
