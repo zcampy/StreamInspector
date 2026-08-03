@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import webbrowser
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QSplitter,
     QStatusBar,
@@ -44,6 +46,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._event_bus = event_bus
         self._domains: dict[str, QTreeWidgetItem] = {}
+        self._flows: list[HttpFlowCaptured] = []
         self._bridge = _QtEventBridge(self)
         self._bridge.status.connect(self._on_status_message)
         self._bridge.proxy_state.connect(self._on_proxy_state_changed)
@@ -107,21 +110,30 @@ class MainWindow(QMainWindow):
         self.history.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.history.setAlternatingRowColors(True)
         self.history.verticalHeader().setVisible(False)
+        self.history.itemSelectionChanged.connect(self._show_selected_flow)
         header = self.history.horizontalHeader()
         for column in (0, 1, 2, 3, 5, 6, 7):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
         self.details = QTabWidget()
-        for name in ("Petición", "Respuesta", "Headers", "Cookies", "JSON", "HTML", "Hex"):
-            placeholder = QLabel(f"Selecciona una entrada para ver: {name}")
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.details.addTab(placeholder, name)
+        self.request_view = self._add_text_tab("Petición")
+        self.response_view = self._add_text_tab("Respuesta")
+        self.headers_view = self._add_text_tab("Headers")
+        self.body_view = self._add_text_tab("Body")
+        self.json_view = self._add_text_tab("JSON")
 
         splitter.addWidget(self.history)
         splitter.addWidget(self.details)
         splitter.setSizes([500, 260])
         self.setCentralWidget(splitter)
+
+    def _add_text_tab(self, title: str) -> QPlainTextEdit:
+        editor = QPlainTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlaceholderText("Selecciona una captura")
+        self.details.addTab(editor, title)
+        return editor
 
     def _build_domain_dock(self) -> None:
         dock = QDockWidget("Dominios", self)
@@ -154,7 +166,10 @@ class MainWindow(QMainWindow):
 
     def _clear_history(self) -> None:
         self.history.setRowCount(0)
+        self._flows.clear()
         self._reset_domain_tree()
+        for editor in self._detail_editors():
+            editor.clear()
         self._event_bus.publish(StatusMessage(message="Historial limpiado"))
 
     def _reset_domain_tree(self) -> None:
@@ -163,6 +178,15 @@ class MainWindow(QMainWindow):
         self._domain_root = QTreeWidgetItem(["Sesión actual"])
         self.domain_tree.addTopLevelItem(self._domain_root)
         self._domain_root.setExpanded(True)
+
+    def _detail_editors(self) -> tuple[QPlainTextEdit, ...]:
+        return (
+            self.request_view,
+            self.response_view,
+            self.headers_view,
+            self.body_view,
+            self.json_view,
+        )
 
     @Slot(object)
     def _on_status_message(self, event: StatusMessage) -> None:
@@ -192,6 +216,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_flow_captured(self, event: HttpFlowCaptured) -> None:
         row = self.history.rowCount()
+        self._flows.append(event)
         self.history.insertRow(row)
         duration = "" if event.duration_ms is None else f"{event.duration_ms:.0f} ms"
         values = [
@@ -212,9 +237,51 @@ class MainWindow(QMainWindow):
             self._domains[event.host] = item
             self._domain_root.addChild(item)
 
+    def _show_selected_flow(self) -> None:
+        row = self.history.currentRow()
+        if row < 0 or row >= len(self._flows):
+            return
+        flow = self._flows[row]
+        request_headers = _format_headers(flow.request_headers)
+        response_headers = _format_headers(flow.response_headers)
+        request_body = _decode_body(flow.request_body)
+        response_body = _decode_body(flow.response_body)
+
+        self.request_view.setPlainText(
+            f"{flow.method} {flow.url} {flow.http_version}\n\n{request_headers}\n\n{request_body}"
+        )
+        self.response_view.setPlainText(
+            f"{flow.http_version} {flow.status_code or ''} {flow.reason}\n\n"
+            f"{response_headers}\n\n{response_body}"
+        )
+        self.headers_view.setPlainText(
+            f"REQUEST\n{request_headers}\n\nRESPONSE\n{response_headers}"
+        )
+        self.body_view.setPlainText(response_body)
+        self.json_view.setPlainText(_pretty_json(response_body))
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         self._event_bus.publish(ProxyStopRequested())
         super().closeEvent(event)
+
+
+def _format_headers(headers: tuple[tuple[str, str], ...]) -> str:
+    return "\n".join(f"{name}: {value}" for name, value in headers)
+
+
+def _decode_body(body: bytes) -> str:
+    if not body:
+        return ""
+    return body.decode("utf-8", errors="replace")
+
+
+def _pretty_json(text: str) -> str:
+    if not text.strip():
+        return ""
+    try:
+        return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        return "El cuerpo seleccionado no contiene JSON válido."
 
 
 def _format_bytes(size: int) -> str:
