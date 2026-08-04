@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 from streaminspector import __version__
 from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
 from streaminspector.exporting import (
+    count_sensitive_headers,
     flows_to_csv,
     flows_to_har,
     flows_to_json,
@@ -277,6 +278,14 @@ class AdvancedMainWindow(SessionMainWindow):
         if not flows:
             QMessageBox.information(self, "Exportar", "No hay capturas visibles para exportar.")
             return
+        # Antes de pedir nombre de archivo: si los flows contienen
+        # headers sensibles (Authorization, Cookie, etc.), preguntamos
+        # al usuario si quiere incluirlos o sanitizarlos. Esto evita
+        # que un export filtrado a un repo público (HAR/JSON) acabe
+        # exponiendo tokens OAuth, cookies de sesión, etc.
+        include_secrets = self._confirm_export_secrets(flows, extension)
+        if include_secrets is None:
+            return  # usuario canceló
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Exportar capturas",
@@ -287,10 +296,63 @@ class AdvancedMainWindow(SessionMainWindow):
             return
         path = Path(filename)
         try:
-            path.write_text(exporter(flows), encoding="utf-8", newline="")
+            # CSV no tiene headers, así que `include_secrets` es no-op
+            # en `flows_to_csv` pero lo pasamos por simetría.
+            if extension == "csv":
+                payload = exporter(flows)
+            else:
+                payload = exporter(flows, include_secrets=include_secrets)
+            path.write_text(payload, encoding="utf-8", newline="")
         except OSError as exc:
             QMessageBox.critical(self, "Error de exportación", str(exc))
             return
+        suffix = "" if include_secrets else " (headers sensibles sanitizados)"
         self._event_bus.publish(
-            StatusMessage(message=f"Exportadas {len(flows)} capturas a {path.name}")
+            StatusMessage(
+                message=(
+                    f"Exportadas {len(flows)} capturas a {path.name}{suffix}"
+                )
+            )
         )
+
+    def _confirm_export_secrets(
+        self, flows: list[HttpFlowCaptured], extension: str
+    ) -> bool | None:
+        """Diálogo que pregunta qué hacer con los headers sensibles del export.
+
+        Devuelve True si el usuario quiere incluirlos, False si prefiere
+        sanitizarlos, None si canceló.
+
+        Para CSV, que no incluye headers, devuelve True sin preguntar
+        (la opción de sanitizar no aplicaría).
+        """
+        if extension == "csv":
+            return True
+        count = count_sensitive_headers(flows)
+        if count == 0:
+            return True
+        message = (
+            f"Vas a exportar {len(flows)} capturas a un archivo .{extension}.\n\n"
+            f"Contienen {count} headers sensibles (Authorization, Cookie, etc.) "
+            f"que podrían incluir tokens OAuth, cookies de sesión u otros secretos.\n\n"
+            f"¿Cómo quieres proceder?\n\n"
+            f"  • Sí, incluir: el archivo se genera TAL CUAL. NO lo subas a "
+            f"ningún sitio público sin revisarlo antes.\n"
+            f"  • No, sanitizar: los valores sensibles se reemplazan por "
+            f"'***REDACTED***'. El archivo es seguro para compartir.\n"
+            f"  • Cancelar: no exportes nada."
+        )
+        reply = QMessageBox.question(
+            self,
+            "Exportar capturas con secretos",
+            message,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,  # default seguro
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            return True
+        if reply == QMessageBox.StandardButton.No:
+            return False
+        return None
