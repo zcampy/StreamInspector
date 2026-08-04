@@ -33,6 +33,10 @@ class M3u8Dialog(QDialog):
         super().__init__(parent)
         self._playlist = playlist
         self._source_url = source_url
+        if request_headers is None and parent is not None:
+            selected_flow = getattr(parent, "_selected_flow", None)
+            flow = selected_flow() if callable(selected_flow) else None
+            request_headers = getattr(flow, "request_headers", ()) if flow else ()
         self._request_headers = request_headers or ()
         self.setWindowTitle("Playlist HLS (m3u8)")
         self.resize(860, 640)
@@ -80,6 +84,7 @@ class M3u8Dialog(QDialog):
         layout.addLayout(info)
 
         self.items_list = QListWidget()
+        self.segments_list = self.items_list
         if playlist.is_master:
             layout.addWidget(QLabel("Variantes:"))
             for variant in playlist.variants:
