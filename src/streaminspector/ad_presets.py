@@ -62,9 +62,42 @@ def merge_ad_preset(existing: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     "Configurar dominios excluidos" qué entradas vienen de dónde (las suyas
     primero, la lista curada después).
     """
+    return _merge_preset(existing, COMMON_AD_DOMAINS)
+
+
+# Dominios de CDNs de stream vistos en capturas reales de StreamInspector.
+# El usuario abre un sitio web de streaming (ej: fctv33hd.fit) y el sitio
+# carga manifests m3u8/segmentos desde hosts que cambian o están obfuscados
+# (sworfa.kdns.fr, fhlsport720.tm33bpoughss0281full.ru, etc.). Con esta
+# lista precargada en el modo WHITELIST, StreamInspector deja pasar
+# transparente el resto del sistema y solo captura estos CDNs.
+COMMON_STREAM_CDN_DOMAINS: tuple[str, ...] = (
+    # Sitios de stream que el usuario prueba en el navegador
+    "fctv33hd.fit",
+    # CDNs observados en los CSVs de captura que sirven los manifests/segmentos
+    "adair.sworfa.kdns.fr",
+    "sworfa.kdns.fr",
+    "fhlsport720.tm33bpoughss0281full.ru",
+    "tm33bpoughss0281full.ru",
+)
+
+
+def merge_stream_preset(existing: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Igual que `merge_ad_preset` pero para el preset de CDNs de stream.
+
+    Pensado para el campo `CapturePolicy.whitelisted_domains` cuando se
+    activa el modo `WHITELIST`. Si el usuario ya tenía dominios propios
+    en la whitelist, se preservan; los del preset se añaden al final.
+    """
+    return _merge_preset(existing, COMMON_STREAM_CDN_DOMAINS)
+
+
+def _merge_preset(
+    existing: tuple[str, ...] | list[str], preset: tuple[str, ...]
+) -> tuple[str, ...]:
     seen: set[str] = set()
     merged: list[str] = []
-    for source in (existing, COMMON_AD_DOMAINS):
+    for source in (existing, preset):
         for domain in source:
             normalized = domain.strip().lower().lstrip("*.").rstrip(".")
             if not normalized or normalized in seen:

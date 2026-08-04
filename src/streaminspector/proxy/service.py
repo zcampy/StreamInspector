@@ -8,6 +8,7 @@ from threading import RLock, Thread
 from mitmproxy import options
 from mitmproxy.tools.dump import DumpMaster
 
+from streaminspector.capture_policy import CapturePolicy
 from streaminspector.core.events import (
     EventBus,
     ProxyError,
@@ -34,10 +35,17 @@ class ProxyService:
     vía `start(host, port)`. La UI los persiste en `QSettings`; este servicio
     no consulta ni pydantic ni QSettings: una sola fuente de verdad arriba,
     una sola conexión aquí.
+
+    Comparte un `CapturePolicy` con la UI: cuando la UI cambia el modo
+    (ALL/WHITELIST) o edita la whitelist, el filtro del addon se actualiza
+    "en vivo" porque la policy es el mismo objeto mutable. Esto permite
+    que el filtrado ocurra a nivel de addon (no en storage) y los datos
+    sensibles nunca lleguen al EventBus.
     """
 
-    def __init__(self, event_bus: EventBus) -> None:
+    def __init__(self, event_bus: EventBus, policy: CapturePolicy) -> None:
         self._event_bus = event_bus
+        self._policy = policy
         self._endpoint = _ProxyEndpoint()
         self._thread: Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -126,7 +134,7 @@ class ProxyService:
             listen_port=port,
         )
         master = DumpMaster(proxy_options, with_termlog=False, with_dumper=False)
-        master.addons.add(CaptureAddon(self._event_bus))
+        master.addons.add(CaptureAddon(self._event_bus, self._policy))
         with self._lock:
             self._master = master
 

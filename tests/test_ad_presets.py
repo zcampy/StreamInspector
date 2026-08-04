@@ -3,7 +3,12 @@ existentes."""
 
 from __future__ import annotations
 
-from streaminspector.ad_presets import COMMON_AD_DOMAINS, merge_ad_preset
+from streaminspector.ad_presets import (
+    COMMON_AD_DOMAINS,
+    COMMON_STREAM_CDN_DOMAINS,
+    merge_ad_preset,
+    merge_stream_preset,
+)
 
 
 def test_common_ad_domains_contains_well_known_networks() -> None:
@@ -88,3 +93,67 @@ def test_merge_idempotent() -> None:
     once = merge_ad_preset(())
     twice = merge_ad_preset(once)
     assert once == twice
+
+
+# -------------------------- Preset de CDNs de stream ------------------------
+
+
+def test_common_stream_cdn_domains_contains_known_streaming_cdns() -> None:
+    """La lista precargada para el modo whitelist debe incluir los CDNs
+    que hemos visto en los CSVs de captura del usuario."""
+    expected = {
+        "fctv33hd.fit",
+        "adair.sworfa.kdns.fr",
+        "sworfa.kdns.fr",
+        "fhlsport720.tm33bpoughss0281full.ru",
+        "tm33bpoughss0281full.ru",
+    }
+    assert expected.issubset(set(COMMON_STREAM_CDN_DOMAINS)), (
+        f"Faltan CDNs clave: {expected - set(COMMON_STREAM_CDN_DOMAINS)}"
+    )
+
+
+def test_common_stream_cdn_domains_has_no_duplicates() -> None:
+    assert len(COMMON_STREAM_CDN_DOMAINS) == len(set(COMMON_STREAM_CDN_DOMAINS))
+
+
+def test_common_stream_cdn_domains_are_lowercase_and_clean() -> None:
+    for domain in COMMON_STREAM_CDN_DOMAINS:
+        assert domain == domain.lower(), f"{domain!r} no está en minúsculas"
+        assert "://" not in domain
+        assert "/" not in domain
+        assert " " not in domain
+
+
+def test_merge_stream_preset_adds_to_empty_list() -> None:
+    merged = merge_stream_preset(())
+    assert set(merged) == set(COMMON_STREAM_CDN_DOMAINS)
+    assert len(merged) == len(COMMON_STREAM_CDN_DOMAINS)
+
+
+def test_merge_stream_preset_preserves_existing() -> None:
+    existing = ("misitio-de-stream.com",)
+    merged = merge_stream_preset(existing)
+    assert merged[0] == "misitio-de-stream.com"
+    for d in COMMON_STREAM_CDN_DOMAINS:
+        assert d in merged
+
+
+def test_merge_stream_preset_dedupes_overlap() -> None:
+    existing = ("fctv33hd.fit", "otro.example")
+    merged = merge_stream_preset(existing)
+    assert merged.count("fctv33hd.fit") == 1
+    assert "otro.example" in merged
+    assert len(merged) == 1 + 1 + len(COMMON_STREAM_CDN_DOMAINS) - 1  # dedupe
+
+
+def test_merge_stream_preset_idempotent() -> None:
+    once = merge_stream_preset(())
+    twice = merge_stream_preset(once)
+    assert once == twice
+
+
+def test_ad_and_stream_presets_are_independent() -> None:
+    """El preset de ads (excluded) y el preset de streams (whitelist) NO
+    deben mezclarse: son listas conceptualmente distintas."""
+    assert set(COMMON_AD_DOMAINS).isdisjoint(set(COMMON_STREAM_CDN_DOMAINS))

@@ -6,6 +6,12 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
+from streaminspector.browser_launcher import (
+    LaunchedBrowser,
+    default_browser,
+    find_browsers,
+    launch_browser,
+)
 from streaminspector.core.events import (
     EventBus,
     HttpFlowCaptured,
@@ -21,6 +27,7 @@ from streaminspector.storage import StorageService
 from streaminspector.system_proxy import (
     SystemProxySnapshot,
     ca_certificate_generated,
+    ca_certificate_installed,
     enable_system_proxy,
     install_ca_certificate,
     restore_system_proxy,
@@ -48,6 +55,8 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         self._proxy_settings = QSettings("StreamInspector", "StreamInspector")
         self._https_dialogs: list[HttpsSetupDialog] = []
         self._system_proxy_snapshot: SystemProxySnapshot | None = None
+        # Handle al navegador dedicado lanzado (None si no hay ninguno abierto).
+        self._launched_browser: LaunchedBrowser | None = None
         self._install_proxy_actions()
         self._show_proxy_endpoint()
 
@@ -87,6 +96,23 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         https_action.triggered.connect(self._show_https_setup)
         menu.addAction(https_action)
 
+        # --- Navegador dedicado para captura aislada ----------------------
+        # Lanza una instancia nueva del navegador con el proxy configurado
+        # por proceso (--proxy-server) y un perfil limpio. El resto del
+        # sistema NO se ve afectado — solo este navegador pasa por mitmproxy.
+        menu.addSeparator()
+        self._open_browser_action = QAction(
+            "Abrir navegador dedicado para captura…", self
+        )
+        self._open_browser_action.triggered.connect(self._open_dedicated_browser)
+        menu.addAction(self._open_browser_action)
+        self._close_browser_action = QAction(
+            "Cerrar navegador de captura", self
+        )
+        self._close_browser_action.triggered.connect(self._close_dedicated_browser)
+        self._close_browser_action.setEnabled(False)
+        menu.addAction(self._close_browser_action)
+
     def _proxy_endpoint(self) -> tuple[str, int]:
         return _sanitize_endpoint(
             self._proxy_settings.value("proxy/host", DEFAULT_PROXY_HOST),
@@ -120,6 +146,10 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
                 self._try_auto_install_ca_certificate()
         else:
             self._restore_windows_proxy()
+            # Si el proxy se detiene, cerramos también el navegador dedicado
+            # (si lo hay) para no dejar al usuario con una ventana zombie
+            # cuyo tráfico ya no se está capturando.
+            self._close_dedicated_browser(silent=True)
 
     def _try_auto_install_ca_certificate(self) -> None:
         """Si el cert de mitmproxy aún no está en el store del usuario, lo instala.
@@ -259,7 +289,137 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         dialog.finished.connect(lambda: self._https_dialogs.remove(dialog))
         dialog.show()
 
+    # --------------------------------- navegador dedicado
+
+    def _open_dedicated_browser(self) -> None:
+        """Lanza una instancia nueva del navegador con el proxy configurado.
+
+        El navegador se lanza con --proxy-server=http://host:port (por
+        proceso, NO por configuración global de Windows) y un perfil
+        temporal, así que:
+        - El usuario puede seguir con su navegador normal sin
+          interferencias.
+        - Solo el tráfico de esta instancia va a StreamInspector.
+        - El perfil se borra al cerrar, sin contaminar el perfil normal.
+        """
+        if not self.proxy_button.isChecked():
+            QMessageBox.information(
+                self,
+                "Proxy detenido",
+                "Activa el proxy primero (botón Proxy OFF → ON). El "
+                "navegador dedicado necesita el proxy en marcha para "
+                "que StreamInspector capture su tráfico.",
+            )
+            return
+        if self._launched_browser is not None and self._launched_browser.is_alive:
+            QMessageBox.information(
+                self,
+                "Navegador ya abierto",
+                f"Ya hay un {self._launched_browser.browser.name} "
+                f"abierto para captura (PID {self._launched_browser.pid}). "
+                "Ciérralo antes de abrir otro.",
+            )
+            return
+
+        # Limpia un handle muerto (el proceso murió pero no lo cerramos)
+        if self._launched_browser is not None and not self._launched_browser.is_alive:
+            self._launched_browser.close()
+            self._launched_browser = None
+
+        host, port = self._proxy_endpoint()
+        browser = default_browser()
+        if browser is None:
+            browsers = find_browsers()
+            if not browsers:
+                QMessageBox.warning(
+                    self,
+                    "Sin navegador compatible",
+                    "No se encontró Microsoft Edge ni Google Chrome "
+                    "instalados. El launcher solo soporta navegadores "
+                    "basados en Chromium por ahora.",
+                )
+                return
+            browser = browsers[0]
+
+        # Si el CA de mitmproxy está en el cert store del usuario, NO
+        # necesitamos --ignore-certificate-errors: la validación TLS
+        # funcionará normal.
+        ignore_cert_errors = not ca_certificate_installed()
+
+        try:
+            launched = launch_browser(
+                browser, host, port, ignore_cert_errors=ignore_cert_errors
+            )
+        except (OSError, FileNotFoundError, NotImplementedError) as exc:
+            QMessageBox.warning(
+                self,
+                "No se pudo abrir el navegador",
+                f"Falló el lanzamiento de {browser.name}: {exc}",
+            )
+            return
+        self._launched_browser = launched
+        self._close_browser_action.setEnabled(True)
+        # Status bar: indica que el navegador dedicado está activo.
+        cert_note = (
+            " (HTTPS sin validar)"
+            if ignore_cert_errors
+            else " (HTTPS validado por CA de mitmproxy)"
+        )
+        self.statusBar().showMessage(
+            f"{browser.name} abierto para captura (PID {launched.pid}){cert_note}",
+            8000,
+        )
+        self._event_bus.publish(
+            StatusMessage(
+                message=(
+                    f"{browser.name} dedicado abierto. Su tráfico va "
+                    f"a StreamInspector; el resto del sistema NO."
+                )
+            )
+        )
+        # Monitorea si el usuario cierra el navegador desde fuera.
+        self._browser_watchdog = QTimer(self)
+        self._browser_watchdog.setInterval(2000)
+        self._browser_watchdog.timeout.connect(self._check_launched_browser)
+        self._browser_watchdog.start()
+
+    def _close_dedicated_browser(self, silent: bool = False) -> None:
+        """Cierra el navegador dedicado y limpia el perfil temporal."""
+        launched = self._launched_browser
+        if launched is None:
+            return
+        was_alive = launched.close()
+        self._launched_browser = None
+        self._close_browser_action.setEnabled(False)
+        if hasattr(self, "_browser_watchdog") and self._browser_watchdog is not None:
+            self._browser_watchdog.stop()
+            self._browser_watchdog = None
+        if not silent and was_alive:
+            self._event_bus.publish(
+                StatusMessage(message="Navegador de captura cerrado.")
+            )
+
+    def _check_launched_browser(self) -> None:
+        """Si el usuario cerró el navegador desde fuera, actualiza la UI."""
+        launched = self._launched_browser
+        if launched is None:
+            return
+        if not launched.is_alive:
+            # El proceso murió por sí solo (usuario cerró la ventana).
+            self._close_dedicated_browser(silent=True)
+            self._event_bus.publish(
+                StatusMessage(
+                    message=(
+                        f"{launched.browser.name} se cerró. Su tráfico "
+                        f"ya no se está capturando."
+                    )
+                )
+            )
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+        # Cerrar el navegador dedicado si está abierto, antes de restaurar
+        # el proxy. No queremos dejar procesos zombie al salir de la app.
+        self._close_dedicated_browser(silent=True)
         self._restore_windows_proxy()
         super().closeEvent(event)
 

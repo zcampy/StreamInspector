@@ -10,6 +10,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from streaminspector.capture_policy import CapturePolicy
 from streaminspector.core.events import (
     EventBus,
     HttpFlowCaptured,
@@ -87,9 +88,25 @@ class StorageService:
         return self._active_session_id
 
     def set_capture_filter(
-        self, predicate: Callable[[HttpFlowCaptured], bool]
+        self,
+        predicate: Callable[[HttpFlowCaptured], bool],
+        policy: CapturePolicy | None = None,
     ) -> None:
         self._capture_filter = predicate
+        # Si nos pasan el policy, lo guardamos para que la UI lo reuse
+        # en lugar de crear uno nuevo. Esto evita que el storage y la UI
+        # tengan policies distintas y se desincronicen.
+        if policy is not None:
+            self._capture_policy_ref = policy
+
+    @property
+    def capture_policy(self) -> CapturePolicy | None:
+        """Devuelve la policy registrada con `set_capture_filter`, si hay.
+
+        La usa la UI (`SelectiveCaptureWindow`) para reusar la misma
+        instancia que el storage y el proxy, en lugar de crear una nueva.
+        """
+        return getattr(self, "_capture_policy_ref", None)
 
     def close(self) -> None:
         self.end_session(self._active_session_id)

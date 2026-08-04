@@ -375,11 +375,66 @@ def test_copy_ffmpeg_action_uses_build_ffmpeg_command(qtbot, monkeypatch) -> Non
     assert ".mp4" in cmd
 
 
-def test_copy_url_no_selection_does_not_copy(qtbot, monkeypatch) -> None:
-    """Sin selección no se copia nada y se muestra info."""
+def test_copy_ffmpeg_action_includes_referer_from_flow(qtbot, monkeypatch) -> None:
+    """Si el flow capturado llevaba `Referer`, el comando ffmpeg lo incluye
+    en `-headers`. Sin esto, los streams protegidos devuelven 403 al
+    pegar el comando en una terminal."""
     captured: list[str] = []
     monkeypatch.setattr(
         QApplication.clipboard(), "setText", lambda text: captured.append(text)
+    )
+
+    # Construimos un flow a mano con Referer en los headers del request.
+    # La URL tiene .m3u8 (vía hint en URL) para que pase el filtro del
+    # panel, pero el caso real es un segmento .avi/.doc con .m3u8
+    # capturado en el mismo flujo.
+    flow = HttpFlowCaptured(
+        flow_id="prot-1",
+        method="GET",
+        scheme="https",
+        host="cdn.example",
+        port=443,
+        path="/playlist.m3u8",
+        url="https://cdn.example/playlist.m3u8",
+        http_version="HTTP/2",
+        status_code=200,
+        reason="OK",
+        content_type="application/vnd.apple.mpegurl",
+        request_headers=(
+            ("Referer", "https://fctv33hd.fit/eventos/newport-county-vs-roma/"),
+            ("User-Agent", "Mozilla/5.0 Test"),
+        ),
+        response_headers=(),
+        request_body=b"",
+        response_body=b"",
+        request_size=0,
+        response_size=0,
+        duration_ms=10.0,
+    )
+    panel = _make_panel(qtbot, [flow])
+    assert panel.table.rowCount() == 1
+    panel.table.selectRow(0)
+    panel._copy_selected_ffmpeg()
+
+    assert len(captured) == 1
+    cmd = captured[0]
+    # El Referer capturado viaja en el comando
+    assert "Referer: https://fctv33hd.fit/eventos/newport-county-vs-roma/" in cmd
+    # El User-Agent capturado también
+    assert "Mozilla/5.0 Test" in cmd
+
+
+def test_copy_url_no_selection_does_not_copy(qtbot, monkeypatch) -> None:
+    """Sin selección no se copia nada y se muestra info (sin bloquear)."""
+    captured: list[str] = []
+    monkeypatch.setattr(
+        QApplication.clipboard(), "setText", lambda text: captured.append(text)
+    )
+    # Sin selección la acción muestra un QMessageBox modal que bloquearía
+    # el test en offscreen. Lo parcheamos para que sea no-op.
+    monkeypatch.setattr(
+        "streaminspector.gui.video_links_panel.QMessageBox.information",
+        lambda *a, **kw: 0,
     )
     panel = _make_panel(
         qtbot,

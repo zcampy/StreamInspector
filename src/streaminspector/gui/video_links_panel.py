@@ -226,7 +226,9 @@ class VideoLinksPanel(QWidget):
             )
             return
         QApplication.clipboard().setText(
-            build_ffmpeg_command(flow.url, flow.content_type)
+            build_ffmpeg_command(
+                flow.url, flow.content_type, flow.request_headers
+            )
         )
 
     def _view_selected_m3u8(self) -> None:
