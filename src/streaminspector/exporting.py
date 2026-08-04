@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
+import re
 from datetime import UTC
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from streaminspector.core.events import HttpFlowCaptured
 
-# Headers cuyo valor, de filtrarse, podría filtrar credenciales. La búsqueda
-# es case-insensitive y por nombre exacto (no por subcadena) para no
-# romper headers legítimos que contengan la palabra en medio.
-# Añadir aquí cualquier header que el equipo considere sensible.
 SENSITIVE_HEADERS: frozenset[str] = frozenset(
     {
         "authorization",
@@ -31,77 +30,176 @@ SENSITIVE_HEADERS: frozenset[str] = frozenset(
     }
 )
 
-# Texto que sustituye al valor del header sensible en los exports. La idea
-# es que sea reconocible como "esto estaba aquí pero lo quitamos" sin
-# perder el nombre del header (útil para debug).
+SENSITIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apikey",
+        "key",
+        "signature",
+        "sig",
+        "auth",
+        "authorization",
+        "session",
+        "sessionid",
+        "jwt",
+        "password",
+        "passwd",
+        "secret",
+        "client_secret",
+    }
+)
+
 REDACTED_VALUE = "***REDACTED***"
+_TOKEN_PATH_RE = re.compile(r"(?i)(/(?:token|auth|session|key)[-_])([^/?#]+)")
 
 
 def is_sensitive_header(name: str) -> bool:
-    """True si el nombre del header (case-insensitive) está en la lista de sensibles."""
     return name.lower() in SENSITIVE_HEADERS
 
 
-def count_sensitive_headers(flows: list[HttpFlowCaptured]) -> int:
-    """Cuenta cuántos headers sensibles hay en el set de flows a exportar.
+def is_sensitive_field(name: str) -> bool:
+    normalized = name.strip().lower().replace("-", "_")
+    return normalized in SENSITIVE_FIELDS
 
-    Sirve para que la UI pueda avisar al usuario ("Vas a exportar N tokens
-    en headers") antes de escribir el archivo.
-    """
+
+def count_sensitive_headers(flows: list[HttpFlowCaptured]) -> int:
     count = 0
     for flow in flows:
-        for name, _value in flow.request_headers:
-            if is_sensitive_header(name):
-                count += 1
-        for name, _value in flow.response_headers:
-            if is_sensitive_header(name):
-                count += 1
+        count += sum(is_sensitive_header(name) for name, _ in flow.request_headers)
+        count += sum(is_sensitive_header(name) for name, _ in flow.response_headers)
     return count
 
 
 def _redact_headers(
     headers: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
-    """Devuelve los headers con los valores sensibles reemplazados por ***."""
     return tuple(
         (name, REDACTED_VALUE if is_sensitive_header(name) else value)
         for name, value in headers
     )
 
 
-def _sanitized_flow(flow: HttpFlowCaptured) -> HttpFlowCaptured:
-    """Devuelve un flow con los headers sensibles reemplazados por ***.
-
-    El dataclass es frozen, así que construimos uno nuevo con los
-    headers saneados. El body NO se modifica: un body que contenga un
-    token en JSON o texto plano es un caso más raro y rompería la
-    utilidad de los exports. Si el usuario quiere sanitizar bodies,
-    debe editar el archivo a posteriori.
-    """
-    return HttpFlowCaptured(
-        flow_id=flow.flow_id,
-        method=flow.method,
-        scheme=flow.scheme,
-        host=flow.host,
-        port=flow.port,
-        path=flow.path,
-        url=flow.url,
-        http_version=flow.http_version,
-        status_code=flow.status_code,
-        reason=flow.reason,
-        content_type=flow.content_type,
-        request_headers=_redact_headers(flow.request_headers),
-        response_headers=_redact_headers(flow.response_headers),
-        request_body=flow.request_body,
-        response_body=flow.response_body,
-        request_size=flow.request_size,
-        response_size=flow.response_size,
-        duration_ms=flow.duration_ms,
+def sanitize_url(url: str) -> str:
+    """Redacta secretos habituales en query string y rutas tokenizadas."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+    query = urlencode(
+        [
+            (name, REDACTED_VALUE if is_sensitive_field(name) else value)
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ],
+        doseq=True,
     )
+    path = _TOKEN_PATH_RE.sub(r"\1" + REDACTED_VALUE, parsed.path)
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, parsed.fragment))
+
+
+def _header_value(headers: tuple[tuple[str, str], ...], name: str) -> str:
+    target = name.lower()
+    for header_name, value in headers:
+        if header_name.lower() == target:
+            return value
+    return ""
+
+
+def _mime_only(content_type: str) -> str:
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def _looks_textual(content_type: str, body: bytes) -> bool:
+    mime = _mime_only(content_type)
+    if (
+        mime.startswith("text/")
+        or mime.endswith("+json")
+        or mime.endswith("+xml")
+        or mime
+        in {
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/x-javascript",
+            "application/x-www-form-urlencoded",
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegurl",
+            "application/dash+xml",
+            "image/svg+xml",
+        }
+    ):
+        return True
+    if not body:
+        return True
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    control_count = sum(ord(char) < 32 and char not in "\r\n\t" for char in text)
+    return control_count <= max(1, len(text) // 100)
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: REDACTED_VALUE
+            if is_sensitive_field(str(key))
+            else _sanitize_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    return value
+
+
+def _sanitize_text_body(text: str, content_type: str) -> str:
+    mime = _mime_only(content_type)
+    if mime == "application/json" or mime.endswith("+json"):
+        try:
+            return json.dumps(
+                _sanitize_json_value(json.loads(text)),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (json.JSONDecodeError, TypeError):
+            return text
+    if mime == "application/x-www-form-urlencoded":
+        return urlencode(
+            [
+                (name, REDACTED_VALUE if is_sensitive_field(name) else value)
+                for name, value in parse_qsl(text, keep_blank_values=True)
+            ],
+            doseq=True,
+        )
+    return text
+
+
+def _serialize_body(
+    body: bytes,
+    content_type: str,
+    *,
+    include_secrets: bool,
+) -> dict[str, Any]:
+    if _looks_textual(content_type, body):
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            if not include_secrets:
+                text = _sanitize_text_body(text, content_type)
+            return {"text": text, "encoding": "utf-8"}
+    return {
+        "text": base64.b64encode(body).decode("ascii"),
+        "encoding": "base64",
+    }
 
 
 def flows_to_csv(
-    flows: list[HttpFlowCaptured], include_secrets: bool = True
+    flows: list[HttpFlowCaptured], include_secrets: bool = False
 ) -> str:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -118,17 +216,17 @@ def flows_to_csv(
             "duration_ms",
         ]
     )
-    # El CSV no incluye headers, así que `include_secrets` es un no-op aquí.
-    # Lo dejamos en la firma por simetría con las otras funciones de export.
     for flow in flows:
+        url = flow.url if include_secrets else sanitize_url(flow.url)
+        path = flow.path if include_secrets else sanitize_url(flow.path)
         writer.writerow(
             [
                 flow.created_at.astimezone(UTC).isoformat(),
                 flow.method,
                 flow.status_code or "",
-                flow.url,
+                url,
                 flow.host,
-                flow.path,
+                path,
                 flow.content_type,
                 flow.response_size,
                 flow.duration_ms if flow.duration_ms is not None else "",
@@ -138,36 +236,15 @@ def flows_to_csv(
 
 
 def flows_to_json(
-    flows: list[HttpFlowCaptured], include_secrets: bool = True
+    flows: list[HttpFlowCaptured], include_secrets: bool = False
 ) -> str:
-    """Serializa los flows a JSON.
-
-    `include_secrets=False` reemplaza los valores de los headers sensibles
-    (Authorization, Cookie, etc.) por '***REDACTED***' antes de serializar.
-    """
-    payload = [_flow_dict(flow) for flow in flows]
-    if not include_secrets:
-        for entry in payload:
-            for header_name in list(entry["request"]["headers"].keys()):
-                if is_sensitive_header(header_name):
-                    entry["request"]["headers"][header_name] = REDACTED_VALUE
-            for header_name in list(entry["response"]["headers"].keys()):
-                if is_sensitive_header(header_name):
-                    entry["response"]["headers"][header_name] = REDACTED_VALUE
+    payload = [_flow_dict(flow, include_secrets=include_secrets) for flow in flows]
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def flows_to_har(
-    flows: list[HttpFlowCaptured], include_secrets: bool = True
+    flows: list[HttpFlowCaptured], include_secrets: bool = False
 ) -> str:
-    """Serializa los flows a HAR.
-
-    `include_secrets=False` reemplaza los valores de los headers sensibles
-    por '***REDACTED***'. Sin esto, un export de una sesión real puede
-    contener tus tokens OAuth, cookies de sesión, etc. — un HAR filtrado
-    a un repo público es un incidente de seguridad (push protection de
-    GitHub bloquea estos pushes por defecto).
-    """
     payload = {
         "log": {
             "version": "1.2",
@@ -180,26 +257,51 @@ def flows_to_har(
 
 def format_request(flow: HttpFlowCaptured) -> str:
     headers = "\n".join(f"{name}: {value}" for name, value in flow.request_headers)
-    body = flow.request_body.decode("utf-8", errors="replace")
-    return f"{flow.method} {flow.url} {flow.http_version}\n{headers}\n\n{body}".rstrip()
+    content_type = _header_value(flow.request_headers, "content-type")
+    body = _serialize_body(flow.request_body, content_type, include_secrets=True)
+    body_text = body["text"]
+    if body["encoding"] == "base64":
+        body_text = f"[base64]\n{body_text}"
+    return f"{flow.method} {flow.url} {flow.http_version}\n{headers}\n\n{body_text}".rstrip()
 
 
-def _flow_dict(flow: HttpFlowCaptured) -> dict[str, Any]:
+def _flow_dict(
+    flow: HttpFlowCaptured, *, include_secrets: bool = False
+) -> dict[str, Any]:
+    request_headers = (
+        flow.request_headers if include_secrets else _redact_headers(flow.request_headers)
+    )
+    response_headers = (
+        flow.response_headers if include_secrets else _redact_headers(flow.response_headers)
+    )
+    request_content_type = _header_value(flow.request_headers, "content-type")
+    request_body = _serialize_body(
+        flow.request_body,
+        request_content_type,
+        include_secrets=include_secrets,
+    )
+    response_body = _serialize_body(
+        flow.response_body,
+        flow.content_type,
+        include_secrets=include_secrets,
+    )
     return {
         "captured_at": flow.created_at.astimezone(UTC).isoformat(),
         "flow_id": flow.flow_id,
         "request": {
             "method": flow.method,
-            "url": flow.url,
+            "url": flow.url if include_secrets else sanitize_url(flow.url),
             "http_version": flow.http_version,
-            "headers": dict(flow.request_headers),
-            "body": flow.request_body.decode("utf-8", errors="replace"),
+            "headers": dict(request_headers),
+            "body": request_body["text"],
+            "body_encoding": request_body["encoding"],
         },
         "response": {
             "status": flow.status_code,
             "reason": flow.reason,
-            "headers": dict(flow.response_headers),
-            "body": flow.response_body.decode("utf-8", errors="replace"),
+            "headers": dict(response_headers),
+            "body": response_body["text"],
+            "body_encoding": response_body["encoding"],
             "content_type": flow.content_type,
             "size": flow.response_size,
         },
@@ -207,21 +309,47 @@ def _flow_dict(flow: HttpFlowCaptured) -> dict[str, Any]:
     }
 
 
-def _har_entry(flow: HttpFlowCaptured, include_secrets: bool = True) -> dict[str, Any]:
-    request_body = flow.request_body.decode("utf-8", errors="replace")
-    response_body = flow.response_body.decode("utf-8", errors="replace")
-    if include_secrets:
-        request_headers = flow.request_headers
-        response_headers = flow.response_headers
-    else:
-        request_headers = _redact_headers(flow.request_headers)
-        response_headers = _redact_headers(flow.response_headers)
+def _har_entry(flow: HttpFlowCaptured, include_secrets: bool = False) -> dict[str, Any]:
+    request_headers = (
+        flow.request_headers if include_secrets else _redact_headers(flow.request_headers)
+    )
+    response_headers = (
+        flow.response_headers if include_secrets else _redact_headers(flow.response_headers)
+    )
+    request_content_type = _header_value(flow.request_headers, "content-type")
+    request_body = _serialize_body(
+        flow.request_body,
+        request_content_type,
+        include_secrets=include_secrets,
+    )
+    response_body = _serialize_body(
+        flow.response_body,
+        flow.content_type,
+        include_secrets=include_secrets,
+    )
+    post_data: dict[str, Any] | None = None
+    if flow.request_body:
+        post_data = {
+            "mimeType": request_content_type,
+            "text": request_body["text"],
+        }
+        if request_body["encoding"] == "base64":
+            post_data["encoding"] = "base64"
+
+    content: dict[str, Any] = {
+        "size": flow.response_size,
+        "mimeType": flow.content_type,
+        "text": response_body["text"],
+    }
+    if response_body["encoding"] == "base64":
+        content["encoding"] = "base64"
+
     return {
         "startedDateTime": flow.created_at.astimezone(UTC).isoformat(),
         "time": flow.duration_ms or 0,
         "request": {
             "method": flow.method,
-            "url": flow.url,
+            "url": flow.url if include_secrets else sanitize_url(flow.url),
             "httpVersion": flow.http_version,
             "headers": [
                 {"name": name, "value": value} for name, value in request_headers
@@ -230,7 +358,7 @@ def _har_entry(flow: HttpFlowCaptured, include_secrets: bool = True) -> dict[str
             "cookies": [],
             "headersSize": -1,
             "bodySize": len(flow.request_body),
-            "postData": {"mimeType": "", "text": request_body} if request_body else None,
+            "postData": post_data,
         },
         "response": {
             "status": flow.status_code or 0,
@@ -240,11 +368,7 @@ def _har_entry(flow: HttpFlowCaptured, include_secrets: bool = True) -> dict[str
                 {"name": name, "value": value} for name, value in response_headers
             ],
             "cookies": [],
-            "content": {
-                "size": flow.response_size,
-                "mimeType": flow.content_type,
-                "text": response_body,
-            },
+            "content": content,
             "redirectURL": "",
             "headersSize": -1,
             "bodySize": flow.response_size,
