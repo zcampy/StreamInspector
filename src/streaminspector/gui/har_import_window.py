@@ -29,6 +29,10 @@ class HarImportWindow(OnboardingWindow):
         action.triggered.connect(self._import_har)
         menu.addAction(action)
 
+        back_action = QAction("Volver a la sesión actual", self)
+        back_action.triggered.connect(self._return_to_live_session)
+        menu.addAction(back_action)
+
     def _import_har(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -56,4 +60,16 @@ class HarImportWindow(OnboardingWindow):
         self.filter_bar.refresh_options()
         self._event_bus.publish(
             StatusMessage(message=f"Importadas {len(flows)} capturas desde {path.name}")
+        )
+
+    def _return_to_live_session(self) -> None:
+        """Limpia la vista y vuelve a mostrar las capturas en vivo de la sesión activa.
+
+        Necesario porque tras importar un HAR (o abrir una sesión histórica), el flag
+        `_visible_session_id` filtra los flows nuevos y solo se podía salir reiniciando.
+        """
+        self._clear_view()
+        self._domain_root.setText(0, "Sesión actual")
+        self._event_bus.publish(
+            StatusMessage(message="Volviendo a la sesión actual")
         )

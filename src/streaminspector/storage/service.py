@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, delete, func, select, update
+from sqlalchemy import create_engine, delete, func, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from streaminspector.core.events import (
@@ -54,12 +54,33 @@ class StorageService:
         self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False)
         self._capture_filter: Callable[[HttpFlowCaptured], bool] = lambda _flow: True
         Base.metadata.create_all(self._engine)
+        self._ensure_schema()
         self._active_session_id = self.create_session()
         self._unsubscribe_flow = event_bus.subscribe(HttpFlowCaptured, self._store_flow)
         self._unsubscribe_delete = event_bus.subscribe(
             StoredHistoryDeleteRequested,
             self._delete_stored_history,
         )
+
+    def _ensure_schema(self) -> None:
+        """Aplica migraciones ligeras para columnas añadidas tras la creación inicial.
+
+        `Base.metadata.create_all` solo crea tablas si no existen; no añade columnas
+        a tablas ya existentes. Esto añade de forma idempotente las columnas que se
+        hayan incorporado en versiones posteriores (p.ej. `request_size`).
+        """
+        with self._engine.begin() as conn:
+            existing = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(captured_flows)")).all()
+            }
+            if "request_size" not in existing:
+                conn.execute(
+                    text(
+                        "ALTER TABLE captured_flows "
+                        "ADD COLUMN request_size INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
 
     @property
     def active_session_id(self) -> int:
@@ -245,6 +266,7 @@ class StorageService:
                     response_headers_json=json.dumps(event.response_headers),
                     request_body=event.request_body,
                     response_body=event.response_body,
+                    request_size=event.request_size,
                     response_size=event.response_size,
                     duration_ms=event.duration_ms,
                 )
@@ -300,6 +322,7 @@ class StorageService:
             response_headers=tuple(tuple(item) for item in json.loads(flow.response_headers_json)),
             request_body=flow.request_body or b"",
             response_body=flow.response_body or b"",
+            request_size=flow.request_size,
             response_size=flow.response_size,
             duration_ms=flow.duration_ms,
         )

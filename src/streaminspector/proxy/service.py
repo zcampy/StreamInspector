@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from threading import RLock, Thread
 
 from mitmproxy import options
 from mitmproxy.tools.dump import DumpMaster
 
-from streaminspector.core.config import ProxySettings
 from streaminspector.core.events import (
     EventBus,
     ProxyError,
@@ -21,12 +21,24 @@ from streaminspector.proxy.addon import CaptureAddon
 LOGGER = logging.getLogger(__name__)
 
 
-class ProxyService:
-    """Run mitmproxy in its own asyncio loop and expose lifecycle through events."""
+@dataclass(slots=True)
+class _ProxyEndpoint:
+    host: str = "127.0.0.1"
+    port: int = 8080
 
-    def __init__(self, event_bus: EventBus, settings: ProxySettings) -> None:
+
+class ProxyService:
+    """Run mitmproxy in its own asyncio loop and expose lifecycle through events.
+
+    El host y el puerto llegan por evento (`ProxyStartRequested`) o se aplican
+    vía `start(host, port)`. La UI los persiste en `QSettings`; este servicio
+    no consulta ni pydantic ni QSettings: una sola fuente de verdad arriba,
+    una sola conexión aquí.
+    """
+
+    def __init__(self, event_bus: EventBus) -> None:
         self._event_bus = event_bus
-        self._settings = settings
+        self._endpoint = _ProxyEndpoint()
         self._thread: Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._master: DumpMaster | None = None
@@ -39,14 +51,19 @@ class ProxyService:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def endpoint(self) -> tuple[str, int]:
+        with self._lock:
+            return self._endpoint.host, self._endpoint.port
+
     def start(self, host: str | None = None, port: int | None = None) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             if host is not None:
-                self._settings.host = host
+                self._endpoint.host = host
             if port is not None:
-                self._settings.port = port
+                self._endpoint.port = port
             self._thread = Thread(
                 target=self._thread_main,
                 name="streaminspector-proxy",
@@ -78,6 +95,7 @@ class ProxyService:
         asyncio.set_event_loop(loop)
         with self._lock:
             self._loop = loop
+            host, port = self._endpoint.host, self._endpoint.port
 
         try:
             loop.run_until_complete(self._run_proxy())
@@ -93,16 +111,19 @@ class ProxyService:
             self._event_bus.publish(
                 ProxyStateChanged(
                     running=False,
-                    host=self._settings.host,
-                    port=self._settings.port,
+                    host=host,
+                    port=port,
                 )
             )
             loop.close()
 
     async def _run_proxy(self) -> None:
+        with self._lock:
+            host, port = self._endpoint.host, self._endpoint.port
+
         proxy_options = options.Options(
-            listen_host=self._settings.host,
-            listen_port=self._settings.port,
+            listen_host=host,
+            listen_port=port,
         )
         master = DumpMaster(proxy_options, with_termlog=False, with_dumper=False)
         master.addons.add(CaptureAddon(self._event_bus))
@@ -112,13 +133,11 @@ class ProxyService:
         self._event_bus.publish(
             ProxyStateChanged(
                 running=True,
-                host=self._settings.host,
-                port=self._settings.port,
+                host=host,
+                port=port,
             )
         )
         self._event_bus.publish(
-            StatusMessage(
-                message=f"Proxy escuchando en {self._settings.host}:{self._settings.port}"
-            )
+            StatusMessage(message=f"Proxy escuchando en {host}:{port}")
         )
         await master.run()

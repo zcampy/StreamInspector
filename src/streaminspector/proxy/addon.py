@@ -38,6 +38,7 @@ class CaptureAddon:
                 response_headers=tuple(response.headers.items(multi=True)),
                 request_body=request.raw_content or b"",
                 response_body=response.raw_content or b"",
+                request_size=len(request.raw_content or b""),
                 response_size=len(response.raw_content or b""),
                 duration_ms=duration_ms,
             )

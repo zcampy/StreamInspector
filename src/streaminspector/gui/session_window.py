@@ -68,6 +68,12 @@ class SessionMainWindow(MainWindow):
         super()._clear_view()
         if hasattr(self, "filter_bar"):
             self.filter_bar.refresh_options()
+        # Resetear el modo de visualización: tras un "Limpiar vista" el usuario
+        # espera volver a ver capturas en vivo de la sesión activa. Sin esto,
+        # después de importar un HAR (_visible_session_id = -1) o abrir una
+        # sesión histórica, el usuario quedaba "atrapado" sin poder volver al
+        # modo en vivo hasta reiniciar la app.
+        self._visible_session_id = None
 
     def _on_flow_captured(self, event: HttpFlowCaptured) -> None:
         if self._visible_session_id not in (None, self._storage.active_session_id):

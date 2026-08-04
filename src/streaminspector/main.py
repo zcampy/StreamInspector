@@ -37,7 +37,7 @@ def build_application() -> tuple[
         event_bus,
         settings.data_dir / settings.storage.database_name,
     )
-    proxy_service = ProxyService(event_bus, settings.proxy)
+    proxy_service = ProxyService(event_bus)
     app.aboutToQuit.connect(proxy_service.close)
     app.aboutToQuit.connect(storage_service.close)
 

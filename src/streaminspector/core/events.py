@@ -77,6 +77,7 @@ class HttpFlowCaptured(Event):
     response_headers: tuple[tuple[str, str], ...] = ()
     request_body: bytes = b""
     response_body: bytes = b""
+    request_size: int = 0
     response_size: int = 0
     duration_ms: float | None = None
 
