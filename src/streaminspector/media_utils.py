@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import re
+import zlib
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 VIDEO_CONTENT_TYPES: frozenset[str] = frozenset(
     {
@@ -47,6 +49,29 @@ VIDEO_PATH_HINTS: tuple[str, ...] = (
     ".mkv",
 )
 
+_TEMPORARY_QUERY_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "auth",
+        "key",
+        "sig",
+        "signature",
+        "expires",
+        "expiry",
+        "exp",
+        "session",
+        "jwt",
+        "_ver",
+        "_ctump",
+        "_ctuph",
+        "_ctutt",
+        "_s1",
+        "_s2",
+    }
+)
+_TEMPORARY_PATH_RE = re.compile(r"(?i)/(?:token|auth|session|key)[-_][^/?#]+")
+
 
 def is_video_content_type(content_type: str) -> bool:
     if not content_type:
@@ -69,13 +94,54 @@ def is_video_url(url: str, content_type: str = "") -> bool:
     return any(hint in path for hint in VIDEO_PATH_HINTS)
 
 
-def is_m3u8_response(content_type: str, body: bytes) -> bool:
+def _header_value(
+    headers: tuple[tuple[str, str], ...] | None,
+    name: str,
+) -> str:
+    target = name.lower()
+    for header_name, value in headers or ():
+        if header_name.lower() == target:
+            return value
+    return ""
+
+
+def decode_response_body(
+    body: bytes,
+    response_headers: tuple[tuple[str, str], ...] | None = None,
+) -> bytes:
+    """Decodifica gzip, deflate o Brotli sin destruir el original si falla."""
+    encoding = _header_value(response_headers, "content-encoding").lower().strip()
+    if not body or not encoding or encoding == "identity":
+        return body
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            try:
+                return zlib.decompress(body)
+            except zlib.error:
+                return zlib.decompress(body, -zlib.MAX_WBITS)
+        if encoding == "br":
+            import brotli
+
+            return brotli.decompress(body)
+    except (OSError, ValueError, zlib.error):
+        return body
+    return body
+
+
+def is_m3u8_response(
+    content_type: str,
+    body: bytes,
+    response_headers: tuple[tuple[str, str], ...] | None = None,
+) -> bool:
     if is_video_content_type(content_type) and "mpegurl" in content_type.lower():
         return True
-    if not body:
+    decoded = decode_response_body(body, response_headers)
+    if not decoded:
         return False
     try:
-        head = body[:64].lstrip().decode("utf-8")
+        head = decoded[:64].lstrip().decode("utf-8")
     except UnicodeDecodeError:
         return False
     return head.startswith("#EXTM3U")
@@ -113,6 +179,17 @@ class M3u8Playlist:
     @property
     def segment_count(self) -> int:
         return len(self.segments)
+
+
+@dataclass(frozen=True, slots=True)
+class ReproducibleLinkInfo:
+    url: str
+    command: str
+    selected_variant: M3u8Variant | None
+    required_headers: tuple[str, ...]
+    sensitive_headers: tuple[str, ...]
+    appears_temporary: bool
+    warnings: tuple[str, ...]
 
 
 _EXTINF_RE = re.compile(r"#EXTINF:\s*([0-9.]+)")
@@ -194,6 +271,41 @@ def parse_m3u8(text: str, base_url: str = "") -> M3u8Playlist:
         segments=tuple(segments),
         variants=tuple(variants),
         raw_lines=tuple(lines),
+    )
+
+
+def _resolution_pixels(resolution: str | None) -> int:
+    if not resolution or "x" not in resolution.lower():
+        return 0
+    width, _, height = resolution.lower().partition("x")
+    try:
+        return int(width) * int(height)
+    except ValueError:
+        return 0
+
+
+def select_best_variant(playlist: M3u8Playlist) -> M3u8Variant | None:
+    """Selecciona mayor BANDWIDTH y usa resolución como segundo criterio."""
+    if not playlist.variants:
+        return None
+    return max(
+        playlist.variants,
+        key=lambda variant: (
+            variant.bandwidth or 0,
+            _resolution_pixels(variant.resolution),
+            variant.frame_rate or 0.0,
+        ),
+    )
+
+
+def appears_temporary_or_signed(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    query_names = {name.lower() for name, _ in parse_qsl(parsed.query)}
+    return bool(query_names & _TEMPORARY_QUERY_NAMES) or bool(
+        _TEMPORARY_PATH_RE.search(parsed.path)
     )
 
 
@@ -303,3 +415,53 @@ def build_ffmpeg_command(
     if path.endswith(".ts"):
         return f"{prefix} -c copy output.ts"
     return f"{prefix} -c copy output.mp4"
+
+
+def build_reproducible_link_info(
+    source_url: str,
+    playlist: M3u8Playlist | None,
+    request_headers: tuple[tuple[str, str], ...] | None = None,
+    *,
+    include_sensitive_headers: bool = False,
+) -> ReproducibleLinkInfo:
+    selected = select_best_variant(playlist) if playlist is not None else None
+    playable_url = selected.url if selected is not None else source_url
+    present = {name.lower() for name, value in request_headers or () if value}
+    required = tuple(
+        label
+        for header, label in (
+            ("referer", "Referer"),
+            ("origin", "Origin"),
+            ("user-agent", "User-Agent"),
+        )
+        if header in present
+    )
+    sensitive = tuple(
+        label
+        for header, label in (("cookie", "Cookie"), ("authorization", "Authorization"))
+        if header in present
+    )
+    temporary = appears_temporary_or_signed(playable_url)
+    warnings: list[str] = []
+    if temporary:
+        warnings.append("La URL parece firmada o temporal y puede caducar.")
+    if sensitive and not include_sensitive_headers:
+        warnings.append(
+            "La captura contiene Cookie/Authorization; actívalas solo si el servidor las exige."
+        )
+    if selected is not None:
+        warnings.append("Se seleccionó automáticamente la variante de mayor calidad.")
+    return ReproducibleLinkInfo(
+        url=playable_url,
+        command=build_ffmpeg_command(
+            playable_url,
+            "application/vnd.apple.mpegurl",
+            request_headers,
+            include_sensitive_headers=include_sensitive_headers,
+        ),
+        selected_variant=selected,
+        required_headers=required,
+        sensitive_headers=sensitive,
+        appears_temporary=temporary,
+        warnings=tuple(warnings),
+    )
