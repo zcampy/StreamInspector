@@ -33,6 +33,11 @@ def _entry_to_flow(entry: dict) -> HttpFlowCaptured:
     content = response.get("content") or {}
     response_body = _content_bytes(content.get("text"), content.get("encoding"))
     response_size = _as_int(content.get("size"), len(response_body))
+    # El HAR 1.2 no expone el tamaño del request de forma fiable: algunos
+    # navegadores lo omiten o lo incluyen como `bodySize` (que en POST con
+    # `Transfer-Encoding: chunked` puede ser -1). Tomamos el tamaño real del
+    # cuerpo descodificado, que es lo que el addon de mitmproxy también usa.
+    request_size = len(request_body)
 
     return HttpFlowCaptured(
         created_at=started,
@@ -51,6 +56,7 @@ def _entry_to_flow(entry: dict) -> HttpFlowCaptured:
         response_headers=_headers(response.get("headers")),
         request_body=request_body,
         response_body=response_body,
+        request_size=request_size,
         response_size=response_size,
         duration_ms=float(entry.get("time") or 0.0),
     )

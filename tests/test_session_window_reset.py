@@ -15,74 +15,56 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from streaminspector.core.events import EventBus, HttpFlowCaptured
+from streaminspector import __version__
+from streaminspector.core.events import EventBus
 from streaminspector.gui.deep_search_window import DeepSearchWindow
 from streaminspector.storage import StorageService
 
 
-def _flow(flow_id: str, host: str = "example.com") -> HttpFlowCaptured:
-    return HttpFlowCaptured(
-        flow_id=flow_id,
-        method="GET",
-        scheme="https",
-        host=host,
-        port=443,
-        path="/",
-        url=f"https://{host}/",
-        http_version="HTTP/2",
-        status_code=200,
-        reason="OK",
-        content_type="application/json",
-        request_body=b"",
-        response_body=b"{}",
-        response_size=2,
-    )
+@pytest.fixture(autouse=True)
+def _suppress_onboarding() -> None:
+    """Evita que el QTimer.singleShot del __init__ abra el OnboardingDialog,
+    que en offscreen puede dejar timers pendientes y colgar el test runner."""
+    settings = QSettings("StreamInspector", "StreamInspector")
+    settings.setValue(f"onboarding/{__version__}", True)
+    settings.setValue("startup_notice/0.1.0a19", True)
+    yield
+    settings.remove(f"onboarding/{__version__}")
+    settings.remove("startup_notice/0.1.0a19")
 
 
-def _build_window(tmp_path: Path) -> tuple[DeepSearchWindow, EventBus, StorageService]:
+@pytest.fixture
+def window(tmp_path: Path):
     _ = QApplication.instance() or QApplication([])
     bus = EventBus()
     storage = StorageService(bus, tmp_path / "test.sqlite3")
     win = DeepSearchWindow(bus, storage, initial_flows=[])
-    return win, bus, storage
+    yield win
+    storage.close()
 
 
-def test_har_view_resets_after_return_to_live(tmp_path: Path) -> None:
-    win, bus, storage = _build_window(tmp_path)
-    try:
-        # Simulate importing a HAR: clears view and sets sentinel.
-        win._import_har = lambda: None  # avoid dialog; just emulate the state change
-        win._clear_view()
-        win._visible_session_id = -1
-        assert win._visible_session_id == -1
+def test_har_view_resets_after_return_to_live(window) -> None:
+    window._clear_view()
+    window._visible_session_id = -1
+    assert window._visible_session_id == -1
 
-        # User clicks "Volver a la sesión actual".
-        win._return_to_live_session()
+    window._return_to_live_session()
 
-        # The flag must be back to None so new flows are shown again.
-        assert win._visible_session_id is None
-    finally:
-        storage.close()
+    assert window._visible_session_id is None
 
 
-def test_clear_view_resets_visible_session_id(tmp_path: Path) -> None:
-    win, _bus, storage = _build_window(tmp_path)
-    try:
-        win._visible_session_id = 999
-        win._clear_view()
-        assert win._visible_session_id is None
-    finally:
-        storage.close()
+def test_clear_view_resets_visible_session_id(window) -> None:
+    window._visible_session_id = 999
+    window._clear_view()
+    assert window._visible_session_id is None
 
 
-def test_clear_view_resets_after_har_sentinel(tmp_path: Path) -> None:
+def test_clear_view_resets_after_har_sentinel(window) -> None:
     """`Limpiar vista` debe sacar al usuario del modo HAR, no requerir un reinicio."""
-    win, _bus, storage = _build_window(tmp_path)
-    try:
-        win._visible_session_id = -1  # sentinel usado por Importar HAR
-        win._clear_view()
-        assert win._visible_session_id is None
-    finally:
-        storage.close()
+    window._visible_session_id = -1  # sentinel usado por Importar HAR
+    window._clear_view()
+    assert window._visible_session_id is None

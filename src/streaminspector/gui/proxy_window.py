@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import socket
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
@@ -20,13 +20,19 @@ from streaminspector.gui.https_setup_dialog import HttpsSetupDialog
 from streaminspector.storage import StorageService
 from streaminspector.system_proxy import (
     SystemProxySnapshot,
+    ca_certificate_generated,
     enable_system_proxy,
+    install_ca_certificate,
     restore_system_proxy,
     system_proxy_supported,
 )
 
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 8080
+
+# Tiempo que tarda mitmproxy en generar el .cer la primera vez. Lo esperamos
+# con un QTimer.singleShot antes de comprobar/instalar para no spamear status.
+CA_INSTALL_DELAY_MS = 2000
 
 
 class ProxyConfiguredWindow(AdvancedMainWindow):
@@ -82,9 +88,10 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         menu.addAction(https_action)
 
     def _proxy_endpoint(self) -> tuple[str, int]:
-        host = str(self._proxy_settings.value("proxy/host", DEFAULT_PROXY_HOST)).strip()
-        port = int(self._proxy_settings.value("proxy/port", DEFAULT_PROXY_PORT))
-        return host or DEFAULT_PROXY_HOST, port
+        return _sanitize_endpoint(
+            self._proxy_settings.value("proxy/host", DEFAULT_PROXY_HOST),
+            self._proxy_settings.value("proxy/port", DEFAULT_PROXY_PORT),
+        )
 
     def _show_proxy_endpoint(self) -> None:
         host, port = self._proxy_endpoint()
@@ -102,8 +109,49 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         super()._on_proxy_state_changed(event)
         if event.running:
             self._enable_windows_proxy(event.host, event.port)
+            # Intentar instalar el CA de mitmproxy en el cert store del usuario
+            # actual (no requiere admin). Lo diferimos un poco para dar tiempo
+            # a que mitmproxy genere el .cer en la primera ejecución.
+            if system_proxy_supported() and not ca_certificate_generated():
+                QTimer.singleShot(
+                    CA_INSTALL_DELAY_MS, self._try_auto_install_ca_certificate
+                )
+            else:
+                self._try_auto_install_ca_certificate()
         else:
             self._restore_windows_proxy()
+
+    def _try_auto_install_ca_certificate(self) -> None:
+        """Si el cert de mitmproxy aún no está en el store del usuario, lo instala.
+
+        Es seguro llamarlo varias veces: si el cert ya está, no hace nada.
+        Si algo falla, lo reporta en la status bar sin romper el flujo principal.
+        """
+        if not system_proxy_supported():
+            return
+        result = install_ca_certificate()
+        if result.already_present:
+            return
+        if result.installed:
+            self._event_bus.publish(
+                StatusMessage(
+                    message=(
+                        "Certificado de mitmproxy instalado automáticamente en el "
+                        "store del usuario actual. HTTPS ya debería confiar en él."
+                    ),
+                    level="info",
+                )
+            )
+        elif result.detail:
+            self._event_bus.publish(
+                StatusMessage(
+                    message=(
+                        f"No se pudo instalar el certificado automáticamente: "
+                        f"{result.detail}. Usa Proxy > Configurar navegador y HTTPS…"
+                    ),
+                    level="error",
+                )
+            )
 
     def _on_proxy_error(self, event: ProxyError) -> None:
         self._restore_windows_proxy()
@@ -224,3 +272,21 @@ def _check_bind_error(host: str, port: int) -> str | None:
     except OSError as exc:
         return str(exc)
     return None
+
+
+def _sanitize_endpoint(host: object, port: object) -> tuple[str, int]:
+    """Devuelve (host, port) saneado, cayendo a los defaults ante entrada corrupta.
+
+    Acepta los valores "crudos" que devuelve `QSettings.value` (que pueden ser
+    cualquier cosa si el usuario editó el registro a mano o hubo un cierre
+    abrupto). Sin sanitización, `int("abc")` o un puerto fuera de rango
+    reventarían la UI al primer `Proxy ON`.
+    """
+    clean_host = str(host or "").strip() or DEFAULT_PROXY_HOST
+    try:
+        clean_port = int(port)
+    except (TypeError, ValueError):
+        clean_port = DEFAULT_PROXY_PORT
+    if not 1 <= clean_port <= 65535:
+        clean_port = DEFAULT_PROXY_PORT
+    return clean_host, clean_port

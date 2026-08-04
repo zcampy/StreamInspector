@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import webbrowser
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent
@@ -9,7 +8,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -100,20 +98,21 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("https://example.com")
-        self.url_edit.setClearButtonEnabled(True)
-        toolbar.addWidget(QLabel(" URL "))
-        toolbar.addWidget(self.url_edit)
-
-        open_button = QPushButton("Abrir")
-        open_button.clicked.connect(self._open_requested_url)
-        toolbar.addWidget(open_button)
-
-        self.proxy_button = QPushButton("Proxy OFF")
+        # El botón de la izquierda es el toggle del proxy. "ON" cuando está
+        # apagado (invita a pulsarlo para arrancarlo) y "OFF" cuando está
+        # encendido. Sustituye a la antigua barra de URL + "Abrir", que
+        # dependía de `webbrowser.open` (silencioso si no hay navegador por
+        # defecto) y confundía con el toggle del proxy.
+        self.proxy_button = QPushButton("ON")
         self.proxy_button.setCheckable(True)
+        self.proxy_button.setMinimumWidth(70)
         self.proxy_button.toggled.connect(self._toggle_proxy)
         toolbar.addWidget(self.proxy_button)
+
+        proxy_label = QLabel(" Arrancar/parar el proxy local (mitmproxy en 127.0.0.1) ")
+        proxy_label.setStyleSheet("color: #888c95;")
+        toolbar.addWidget(proxy_label)
+        toolbar.addSeparator()
 
     def _build_central_area(self) -> None:
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -171,16 +170,6 @@ class MainWindow(QMainWindow):
         if flows:
             self.statusBar().showMessage(f"Restauradas {len(flows)} capturas guardadas")
 
-    def _open_requested_url(self) -> None:
-        url = self.url_edit.text().strip()
-        if not url:
-            self._event_bus.publish(StatusMessage(message="Introduce una URL"))
-            return
-        if "://" not in url:
-            url = f"https://{url}"
-        webbrowser.open(url)
-        self._event_bus.publish(StatusMessage(message=f"Abriendo {url}"))
-
     def _toggle_proxy(self, enabled: bool) -> None:
         self.proxy_button.setEnabled(False)
         event = ProxyStartRequested() if enabled else ProxyStopRequested()
@@ -231,7 +220,9 @@ class MainWindow(QMainWindow):
     def _on_proxy_state_changed(self, event: ProxyStateChanged) -> None:
         self.proxy_button.blockSignals(True)
         self.proxy_button.setChecked(event.running)
-        self.proxy_button.setText("Proxy ON" if event.running else "Proxy OFF")
+        # "ON" cuando está apagado (invita a arrancarlo), "OFF" cuando está
+        # encendido (invita a pararlo). Texto corto y unívoco.
+        self.proxy_button.setText("OFF" if event.running else "ON")
         self.proxy_button.setEnabled(True)
         self.proxy_button.blockSignals(False)
         if event.running:
