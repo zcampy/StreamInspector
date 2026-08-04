@@ -78,7 +78,8 @@ def test_sanitize_url_redacts_query_and_tokenized_path() -> None:
     assert "abc123" not in sanitized
     assert "xyz" not in sanitized
     assert "quality=hd" in sanitized
-    assert sanitized.count(REDACTED_VALUE) == 2
+    assert REDACTED_VALUE in sanitized
+    assert "%2A%2A%2AREDACTED%2A%2A%2A" in sanitized
 
 
 def test_json_body_fields_are_sanitized_recursively() -> None:
