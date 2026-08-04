@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -89,6 +90,16 @@ class VideoLinksPanel(QWidget):
 
         # Botones de acción sobre la fila seleccionada
         button_layout = QHBoxLayout()
+
+        # "Probar en navegador" va primero: es la acción más rápida para
+        # ver si el stream funciona. Abre la URL en el navegador por defecto
+        # del sistema; si el usuario tiene el navegador dedicado abierto
+        # (Proxy > Abrir navegador dedicado…), la URL se puede abrir
+        # también ahí para ver el tráfico capturado.
+        self.play_button = QPushButton("▶ Probar en navegador")
+        self.play_button.clicked.connect(self._open_selected_in_browser)
+        self.play_button.setEnabled(False)
+        button_layout.addWidget(self.play_button)
 
         self.copy_url_button = QPushButton("Copiar URL")
         self.copy_url_button.clicked.connect(self._copy_selected_url)
@@ -245,6 +256,34 @@ class VideoLinksPanel(QWidget):
         dialog = M3u8Dialog(playlist, flow.url, self)
         dialog.show()
 
+    def _open_selected_in_browser(self) -> None:
+        """Abre la URL seleccionada en el navegador por defecto del sistema.
+
+        Si el proxy está activo y el navegador del sistema respeta el
+        proxy de Windows, el tráfico se captura. Si el usuario tiene el
+        navegador dedicado abierto (Proxy > Abrir navegador dedicado…),
+        también puede abrir la URL ahí copiándola en su barra de
+        direcciones, y el tráfico queda igualmente capturado.
+
+        Para m3u8 el navegador carga el manifest y empieza a pedir
+        segmentos. Para mp4/webm suele reproducir directamente. Para
+        segmentos sueltos (.ts, .m4s) el navegador descarga el archivo
+        en lugar de reproducirlo — eso es esperado, son los trozos.
+        """
+        flow = self._selected_flow()
+        if flow is None:
+            QMessageBox.information(
+                self, "Probar en navegador", "Selecciona un stream primero."
+            )
+            return
+        ok = QDesktopServices.openUrl(QUrl(flow.url))
+        if not ok:
+            QMessageBox.warning(
+                self,
+                "No se pudo abrir el navegador",
+                f"El sistema no pudo abrir esta URL:\n{flow.url}",
+            )
+
     def _on_double_click(self, _index) -> None:
         flow = self._selected_flow()
         if flow is None:
@@ -256,6 +295,7 @@ class VideoLinksPanel(QWidget):
 
     def _update_button_state(self) -> None:
         flow = self._selected_flow()
+        self.play_button.setEnabled(flow is not None)
         self.copy_url_button.setEnabled(flow is not None)
         self.copy_ffmpeg_button.setEnabled(flow is not None)
         self.view_m3u8_button.setEnabled(
@@ -281,6 +321,8 @@ class VideoLinksPanel(QWidget):
         if flow is None:
             return
         menu = QMenu(self)
+        play_action = menu.addAction("▶ Probar en navegador")
+        play_action.triggered.connect(self._open_selected_in_browser)
         copy_url = menu.addAction("Copiar URL")
         copy_url.triggered.connect(self._copy_selected_url)
         copy_ffmpeg = menu.addAction("Copiar como ffmpeg")

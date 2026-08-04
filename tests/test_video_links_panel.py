@@ -270,7 +270,7 @@ def test_panel_summary_breaks_down_by_type(qtbot) -> None:
 
 
 def test_buttons_disabled_with_no_selection(qtbot) -> None:
-    """Sin selección, los 3 botones de fila están deshabilitados."""
+    """Sin selección, los 4 botones de fila están deshabilitados."""
     panel = _make_panel(
         qtbot,
         [
@@ -281,6 +281,7 @@ def test_buttons_disabled_with_no_selection(qtbot) -> None:
             ),
         ],
     )
+    assert panel.play_button.isEnabled() is False
     assert panel.copy_url_button.isEnabled() is False
     assert panel.copy_ffmpeg_button.isEnabled() is False
     assert panel.view_m3u8_button.isEnabled() is False
@@ -289,7 +290,7 @@ def test_buttons_disabled_with_no_selection(qtbot) -> None:
 
 
 def test_buttons_enable_with_selection(qtbot) -> None:
-    """Seleccionando una fila, los 3 botones se habilitan."""
+    """Seleccionando una fila, los 4 botones se habilitan."""
     panel = _make_panel(
         qtbot,
         [
@@ -302,13 +303,15 @@ def test_buttons_enable_with_selection(qtbot) -> None:
     )
     panel.table.selectRow(0)
     panel._update_button_state()
+    assert panel.play_button.isEnabled() is True
     assert panel.copy_url_button.isEnabled() is True
     assert panel.copy_ffmpeg_button.isEnabled() is True
     assert panel.view_m3u8_button.isEnabled() is True
 
 
 def test_view_m3u8_button_only_enabled_for_m3u8(qtbot) -> None:
-    """Un .mp4 NO habilita el botón de ver segmentos m3u8."""
+    """Un .mp4 NO habilita el botón de ver segmentos m3u8,
+    pero SÍ habilita 'Probar en navegador'."""
     panel = _make_panel(
         qtbot,
         [
@@ -317,9 +320,96 @@ def test_view_m3u8_button_only_enabled_for_m3u8(qtbot) -> None:
     )
     panel.table.selectRow(0)
     panel._update_button_state()
+    assert panel.play_button.isEnabled() is True
     assert panel.copy_url_button.isEnabled() is True
     assert panel.copy_ffmpeg_button.isEnabled() is True
     assert panel.view_m3u8_button.isEnabled() is False
+
+
+# ----------------------------- Probar en navegador ---------------------------
+
+
+def test_play_button_label_is_descriptive() -> None:
+    """El botón debe identificarse claramente para que el usuario sepa
+    qué va a pasar al pulsarlo."""
+    from streaminspector.gui.video_links_panel import VideoLinksPanel
+
+    # Solo necesitamos el widget, no un panel funcional. Mockeamos el
+    # flows_provider para no tocar la red.
+    panel = VideoLinksPanel(lambda: [])
+    assert "Probar" in panel.play_button.text()
+    assert "navegador" in panel.play_button.text()
+
+
+def test_play_button_opens_url_in_default_browser(qtbot, monkeypatch) -> None:
+    """Al pulsar 'Probar en navegador', se llama a QDesktopServices.openUrl
+    con la URL del flow seleccionado."""
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        "streaminspector.gui.video_links_panel.QDesktopServices.openUrl",
+        lambda url: opened_urls.append(url.toString()) or True,
+    )
+
+    panel = _make_panel(
+        qtbot,
+        [
+            _flow(
+                "a",
+                url="https://cdn.example.com/playlist.m3u8",
+                content_type="application/vnd.apple.mpegurl",
+            ),
+        ],
+    )
+    panel.table.selectRow(0)
+    panel._open_selected_in_browser()
+    assert opened_urls == ["https://cdn.example.com/playlist.m3u8"]
+
+
+def test_play_button_works_for_mp4_too(qtbot, monkeypatch) -> None:
+    """'Probar' también funciona con MP4 directo (no solo m3u8)."""
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        "streaminspector.gui.video_links_panel.QDesktopServices.openUrl",
+        lambda url: opened_urls.append(url.toString()) or True,
+    )
+
+    panel = _make_panel(
+        qtbot,
+        [
+            _flow("a", url="https://cdn.example.com/clip.mp4", content_type=""),
+        ],
+    )
+    panel.table.selectRow(0)
+    panel._open_selected_in_browser()
+    assert opened_urls == ["https://cdn.example.com/clip.mp4"]
+
+
+def test_play_button_no_selection_does_nothing(qtbot, monkeypatch) -> None:
+    """Sin selección, el botón está deshabilitado y la acción no se llama."""
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        "streaminspector.gui.video_links_panel.QDesktopServices.openUrl",
+        lambda url: opened_urls.append(url.toString()) or True,
+    )
+    # Evitar que el QMessageBox bloquee el test
+    monkeypatch.setattr(
+        "streaminspector.gui.video_links_panel.QMessageBox.information",
+        lambda *a, **kw: 0,
+    )
+
+    panel = _make_panel(
+        qtbot,
+        [
+            _flow(
+                "a",
+                url="https://cdn.example.com/x.m3u8",
+                content_type="application/vnd.apple.mpegurl",
+            ),
+        ],
+    )
+    # NO seleccionamos nada
+    panel._open_selected_in_browser()
+    assert opened_urls == []
 
 
 # ---------------------------------------------------------------- acciones
