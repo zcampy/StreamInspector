@@ -33,6 +33,7 @@ from streaminspector.core.events import (
     StoredHistoryDeleted,
     StoredHistoryDeleteRequested,
 )
+from streaminspector.gui.video_links_panel import VideoLinksPanel
 
 
 class _QtEventBridge(QObject):
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         self._build_central_area()
         self._build_domain_dock()
         self._build_status_bar()
+        self._build_video_links_panel()
         self._subscribe_events()
         self._restore_initial_flows(initial_flows or [])
 
@@ -171,6 +173,29 @@ class MainWindow(QMainWindow):
         status.showMessage("Preparado — activa el proxy para comenzar")
         self.setStatusBar(status)
 
+    def _build_video_links_panel(self) -> None:
+        """Dock inferior con solo los streams de vídeo/audio capturados.
+
+        Es un derivado de `self._flows`: lo único que guarda es un map
+        `URL → flow` para resolver la fila seleccionada. Se actualiza
+        automáticamente al final de `_append_flow` y `_clear_view`.
+        """
+        self.video_links_panel = VideoLinksPanel(
+            lambda: self._flows, self
+        )
+        self.video_links_dock = QDockWidget("Streams de vídeo", self)
+        self.video_links_dock.setObjectName("video_links_dock")
+        self.video_links_dock.setWidget(self.video_links_panel)
+        # Permitir que el usuario lo oculte/mueva/flote como cualquier dock.
+        self.video_links_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea
+            | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.video_links_dock)
+        # El panel empieza vacío hasta que llegue el primer flow o se
+        # restauren flows desde SQLite.
+        self.video_links_panel.refresh()
+
     def _restore_initial_flows(self, flows: list[HttpFlowCaptured]) -> None:
         for flow in flows:
             self._append_flow(flow)
@@ -196,6 +221,9 @@ class MainWindow(QMainWindow):
         self._reset_domain_tree()
         for editor in self._detail_editors():
             editor.clear()
+        panel = getattr(self, "video_links_panel", None)
+        if panel is not None:
+            panel.refresh()
         self._event_bus.publish(
             StatusMessage(message="Vista limpiada; el historial guardado no se ha eliminado")
         )
@@ -312,6 +340,13 @@ class MainWindow(QMainWindow):
             item = QTreeWidgetItem([event.host])
             self._domains[event.host] = item
             self._domain_root.addChild(item)
+
+        # El panel inferior de streams se rebuildea entero. Es barato (pocas
+        # filas) y garantiza que un flow cargado tarde o temprano
+        # aparezca sin invalidar caches.
+        panel = getattr(self, "video_links_panel", None)
+        if panel is not None:
+            panel.refresh()
 
     def _show_selected_flow(self) -> None:
         row = self.history.currentRow()
