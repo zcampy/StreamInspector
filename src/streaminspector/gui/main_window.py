@@ -98,20 +98,27 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # El botón de la izquierda es el toggle del proxy. "ON" cuando está
-        # apagado (invita a pulsarlo para arrancarlo) y "OFF" cuando está
-        # encendido. Sustituye a la antigua barra de URL + "Abrir", que
-        # dependía de `webbrowser.open` (silencioso si no hay navegador por
-        # defecto) y confundía con el toggle del proxy.
-        self.proxy_button = QPushButton("ON")
+        # Toggle del proxy. Texto siempre muestra el ESTADO actual ("Proxy ON"
+        # cuando está encendido, "Proxy OFF" cuando está apagado) y un fondo
+        # verde cuando está activo. Esto evita la confusión de la convención
+        # acción/estado. Sustituye a la antigua URL bar + "Abrir" (que dependía
+        # de `webbrowser.open` y no hacía nada si no había navegador por
+        # defecto).
+        self.proxy_button = QPushButton("Proxy OFF")
         self.proxy_button.setCheckable(True)
-        self.proxy_button.setMinimumWidth(70)
+        self.proxy_button.setMinimumWidth(110)
+        self.proxy_button.setToolTip(
+            "Arrancar o parar el proxy local (mitmproxy en 127.0.0.1). "
+            "Atajo: Ctrl+P"
+        )
+        self.proxy_button.setShortcut("Ctrl+P")
         self.proxy_button.toggled.connect(self._toggle_proxy)
         toolbar.addWidget(self.proxy_button)
 
-        proxy_label = QLabel(" Arrancar/parar el proxy local (mitmproxy en 127.0.0.1) ")
-        proxy_label.setStyleSheet("color: #888c95;")
-        toolbar.addWidget(proxy_label)
+        # Indicador textual redundante para usuarios que no distinguen el color.
+        self.proxy_status_label = QLabel(" Proxy detenido")
+        self.proxy_status_label.setStyleSheet("color: #888c95;")
+        toolbar.addWidget(self.proxy_status_label)
         toolbar.addSeparator()
 
     def _build_central_area(self) -> None:
@@ -171,9 +178,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Restauradas {len(flows)} capturas guardadas")
 
     def _toggle_proxy(self, enabled: bool) -> None:
-        self.proxy_button.setEnabled(False)
+        # NO desactivamos el botón aquí: el estado real lo dicta `ProxyStateChanged`
+        # cuando mitmproxy termina de arrancar/parar. Si lo desactivamos y por
+        # algún motivo el evento `running=False` no llega, el botón se queda
+        # muerto y el usuario no puede volver a pulsar. El throttle lo hace
+        # `start()` en `ProxyService` (chequea `is_alive()` antes de crear hilo).
         event = ProxyStartRequested() if enabled else ProxyStopRequested()
         self._event_bus.publish(event)
+        if enabled:
+            self.statusBar().showMessage("Arrancando proxy…", 4000)
+        else:
+            self.statusBar().showMessage("Deteniendo proxy…", 4000)
 
     def _clear_view(self) -> None:
         self.history.setRowCount(0)
@@ -216,15 +231,43 @@ class MainWindow(QMainWindow):
     def _on_status_message(self, event: StatusMessage) -> None:
         self.statusBar().showMessage(event.message, 6000)
 
-    @Slot(object)
-    def _on_proxy_state_changed(self, event: ProxyStateChanged) -> None:
+    def _render_proxy_state(self, running: bool, host: str = "", port: int = 0) -> None:
+        """Actualiza el botón y el indicador para reflejar el estado REAL del proxy.
+
+        Usado desde `_on_proxy_state_changed` y desde `_on_proxy_error`. Refleja
+        el estado sin disparar `toggled` para evitar bucles de "click → stop →
+        toggle → start".
+        """
         self.proxy_button.blockSignals(True)
-        self.proxy_button.setChecked(event.running)
-        # "ON" cuando está apagado (invita a arrancarlo), "OFF" cuando está
-        # encendido (invita a pararlo). Texto corto y unívoco.
-        self.proxy_button.setText("OFF" if event.running else "ON")
+        self.proxy_button.setChecked(running)
+        self.proxy_button.setText("Proxy ON" if running else "Proxy OFF")
+        # Fondo verde cuando está activo para feedback visual adicional.
+        if running:
+            self.proxy_button.setStyleSheet(
+                "QPushButton { background-color: #1f7a3a; color: #ffffff; "
+                "border: 1px solid #2a9c4a; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #25914a; }"
+            )
+        else:
+            self.proxy_button.setStyleSheet("")
         self.proxy_button.setEnabled(True)
         self.proxy_button.blockSignals(False)
+
+        # Etiqueta redundante: si el color falla o el usuario no distingue
+        # el rojo/verde, el texto al lado lo dice sin ambigüedad.
+        if hasattr(self, "proxy_status_label"):
+            if running:
+                self.proxy_status_label.setText(
+                    f" Proxy escuchando en {host}:{port}" if host else " Proxy activo"
+                )
+                self.proxy_status_label.setStyleSheet("color: #6dd58c;")
+            else:
+                self.proxy_status_label.setText(" Proxy detenido")
+                self.proxy_status_label.setStyleSheet("color: #888c95;")
+
+    @Slot(object)
+    def _on_proxy_state_changed(self, event: ProxyStateChanged) -> None:
+        self._render_proxy_state(event.running, event.host, event.port)
         if event.running:
             self.statusBar().showMessage(f"Proxy activo en {event.host}:{event.port}")
         else:
@@ -232,11 +275,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_proxy_error(self, event: ProxyError) -> None:
-        self.proxy_button.blockSignals(True)
-        self.proxy_button.setChecked(False)
-        self.proxy_button.setText("Proxy OFF")
-        self.proxy_button.setEnabled(True)
-        self.proxy_button.blockSignals(False)
+        self._render_proxy_state(running=False)
         self.statusBar().showMessage(f"Error del proxy: {event.message}", 10000)
 
     @Slot(object)

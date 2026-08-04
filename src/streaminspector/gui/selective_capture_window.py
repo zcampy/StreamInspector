@@ -4,6 +4,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
+from streaminspector.ad_presets import COMMON_AD_DOMAINS, merge_ad_preset
 from streaminspector.capture_policy import CapturePolicy, normalize_domains
 from streaminspector.core.events import EventBus, HttpFlowCaptured, StatusMessage
 from streaminspector.gui.proxy_window import ProxyConfiguredWindow
@@ -53,6 +54,12 @@ class SelectiveCaptureWindow(ProxyConfiguredWindow):
         domains_action.triggered.connect(self._configure_excluded_domains)
         menu.addAction(domains_action)
 
+        load_preset_action = QAction(
+            "Cargar lista de exclusión de ads (preset)…", self
+        )
+        load_preset_action.triggered.connect(self._load_ad_preset)
+        menu.addAction(load_preset_action)
+
         menu.addSeparator()
         status_action = QAction("Ver política actual…", self)
         status_action.triggered.connect(self._show_capture_policy)
@@ -91,6 +98,39 @@ class SelectiveCaptureWindow(ProxyConfiguredWindow):
         self._refresh_capture_status()
         self._event_bus.publish(
             StatusMessage(message=f"Dominios excluidos: {len(domains)}")
+        )
+
+    def _load_ad_preset(self) -> None:
+        """Añade la lista curada de ads/trackers a los dominios excluidos.
+
+        La acción es aditiva: si el usuario ya tiene dominios propios, se
+        conservan. Los nuevos se añaden al final sin duplicados.
+        """
+        existing = self._capture_policy.excluded_domains
+        merged = merge_ad_preset(existing)
+        added = len(merged) - len(existing)
+        if added == 0:
+            self._event_bus.publish(
+                StatusMessage(
+                    message=(
+                        f"La lista curada ya estaba incluida "
+                        f"({len(COMMON_AD_DOMAINS)} dominios)."
+                    )
+                )
+            )
+            return
+        self._capture_policy.excluded_domains = merged
+        self._capture_settings.setValue(
+            "capture/excluded_domains", "\n".join(merged)
+        )
+        self._refresh_capture_status()
+        self._event_bus.publish(
+            StatusMessage(
+                message=(
+                    f"Preset de ads aplicado: +{added} dominios "
+                    f"(total {len(merged)})."
+                )
+            )
         )
 
     def _show_capture_policy(self) -> None:
