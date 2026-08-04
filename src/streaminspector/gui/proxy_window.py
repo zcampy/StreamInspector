@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import socket
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QSettings, QTimer
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QSettings, QTimer, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from streaminspector.browser_launcher import (
@@ -12,6 +13,7 @@ from streaminspector.browser_launcher import (
     find_browsers,
     launch_browser,
 )
+from streaminspector.capture_policy import CaptureMode, save_capture_policy
 from streaminspector.core.events import (
     EventBus,
     HttpFlowCaptured,
@@ -101,6 +103,11 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
         # por proceso (--proxy-server) y un perfil limpio. El resto del
         # sistema NO se ve afectado — solo este navegador pasa por mitmproxy.
         menu.addSeparator()
+        self._scan_web_action = QAction(
+            "Escanear una web específica…", self
+        )
+        self._scan_web_action.triggered.connect(self._scan_specific_web)
+        menu.addAction(self._scan_web_action)
         self._open_browser_action = QAction(
             "Abrir navegador dedicado para captura…", self
         )
@@ -291,6 +298,117 @@ class ProxyConfiguredWindow(AdvancedMainWindow):
 
     # --------------------------------- navegador dedicado
 
+    def _scan_specific_web(self) -> None:
+        """Orquesta la captura enfocada a UNA sola web.
+
+        Pasos automáticos:
+        1. Pide al usuario la URL a escanear.
+        2. Extrae el dominio y lo añade a la whitelist.
+        3. Cambia el modo a WHITELIST (si no lo estaba).
+        4. Persiste la policy.
+        5. Arranca el proxy si está apagado.
+        6. Abre el navegador dedicado apuntando a esa URL.
+
+        Si el usuario quiere escanear otra web, repite el flujo y se
+        acumula en la whitelist. Si quiere limpiar la whitelist, lo
+        hace desde Captura > Modo de captura > Configurar dominios
+        permitidos…
+        """
+        policy = self._storage.capture_policy
+        if policy is None:
+            # Fallback defensivo: en tests o scripts puede no haber policy.
+            QMessageBox.warning(
+                self,
+                "Sin política de captura",
+                "No se encontró la política de captura. Reinicia StreamInspector.",
+            )
+            return
+
+        url, accepted = QInputDialog.getText(
+            self,
+            "Escanear una web específica",
+            "URL de la web a escanear (solo se capturará este dominio):",
+            text="https://",
+        )
+        if not accepted:
+            return
+        domain = extract_domain_for_whitelist(url.strip())
+        if domain is None:
+            QMessageBox.warning(
+                self,
+                "URL no válida",
+                f"La URL debe empezar por http:// o https:// y tener un "
+                f"dominio válido.\n\nRecibido: {url}",
+            )
+            return
+
+        # Acumular en la whitelist (no destructivo: lo que ya estaba se
+        # conserva). Si ya estaba este dominio, lo detectamos para que
+        # el status no diga "+1" cuando en realidad era un duplicado.
+        already = domain in policy.whitelisted_domains
+        if not already:
+            policy.whitelisted_domains = (domain,) + tuple(
+                d for d in policy.whitelisted_domains if d != domain
+            )
+        policy.mode = CaptureMode.WHITELIST
+        save_capture_policy(self._capture_settings, policy)
+
+        # Refresca el status de la UI (muestra el nuevo modo + el
+        # conteo de dominios en la status bar).
+        if hasattr(self, "_refresh_capture_status"):
+            self._refresh_capture_status()
+        if hasattr(self, "_mode_whitelist_action"):
+            self._mode_whitelist_action.setChecked(True)
+
+        self._event_bus.publish(
+            StatusMessage(
+                message=(
+                    f"Whitelist: {'+' if not already else ''}"
+                    f"{domain}. Modo whitelist activo."
+                )
+            )
+        )
+
+        # Arranca el proxy si está apagado.
+        if not self.proxy_button.isChecked():
+            self._toggle_proxy(True)
+
+        # Lanza el navegador dedicado apuntando a la URL.
+        # Reconstruimos la URL normalizada (scheme + host + path, sin
+        # query ni fragment) para evitar tokens en la barra del navegador.
+        parsed = urlparse(url.strip())
+        normalized = f"{parsed.scheme}://{parsed.hostname}{parsed.path or '/'}"
+        self._open_dedicated_browser_at(normalized)
+
+    def _open_dedicated_browser_at(self, url: str) -> None:
+        """Como `_open_dedicated_browser`, pero abre `url` en la nueva pestaña.
+
+        Si no hay navegador ya lanzado, crea uno. Si ya hay uno, simplemente
+        le pasa la URL al sistema para que la abra (que en Windows con un
+        navegador por defecto, abre en la instancia activa si puede).
+        """
+        if self._launched_browser is not None and self._launched_browser.is_alive:
+            # Ya hay un navegador dedicado. Le pedimos al sistema que
+            # abra la URL — el SO la dirigirá a la instancia por defecto
+            # (que es la nuestra, recién lanzada).
+            QDesktopServices.openUrl(QUrl(url))
+            self._event_bus.publish(
+                StatusMessage(
+                    message=f"URL abierta en el navegador de captura: {url}"
+                )
+            )
+            return
+        # No hay navegador: lanza uno nuevo y, en cuanto esté listo,
+        # abre la URL. Como `launch_browser` es síncrono (Popen) y el
+        # navegador tarda unos ms en cargar la home, abrimos la URL
+        # justo después de lanzar.
+        self._open_dedicated_browser()
+        launched = self._launched_browser
+        if launched is not None and launched.is_alive:
+            # Programar la apertura de la URL un poco después para dar
+            # tiempo a que el navegador esté listo.
+            QTimer.singleShot(1500, lambda: QDesktopServices.openUrl(QUrl(url)))
+
     def _open_dedicated_browser(self) -> None:
         """Lanza una instancia nueva del navegador con el proxy configurado.
 
@@ -450,3 +568,43 @@ def _sanitize_endpoint(host: object, port: object) -> tuple[str, int]:
     if not 1 <= clean_port <= 65535:
         clean_port = DEFAULT_PROXY_PORT
     return clean_host, clean_port
+
+
+def extract_domain_for_whitelist(url: str) -> str | None:
+    """Extrae el dominio normalizado de una URL para añadirlo a la whitelist.
+
+    Devuelve el dominio en minúsculas y sin 'www.' inicial, o None si la
+    URL no es parseable como http/https con host.
+
+    Función pura (sin UI) para que se pueda testear y reutilizar.
+
+    Ejemplos:
+        >>> extract_domain_for_whitelist("https://fctv33hd.fit/evento-x")
+        'fctv33hd.fit'
+        >>> extract_domain_for_whitelist("HTTPS://WWW.FCTV33HD.FIT/EVENTO?token=abc")
+        'fctv33hd.fit'
+        >>> extract_domain_for_whitelist("ftp://example.com")
+        None
+        >>> extract_domain_for_whitelist("not a url")
+        None
+        >>> extract_domain_for_whitelist("")
+        None
+    """
+    if not url:
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
