@@ -1,14 +1,4 @@
-"""Panel inferior que muestra SOLO los enlaces a streams de vídeo/audio.
-
-Es un *derivado* de la lista principal de flows: no duplica estado, solo
-lee `self._flows` del `MainWindow` y filtra por `is_video_url` /
-`is_m3u8_response`. Acciones disponibles:
-- Copiar URL al portapapeles
-- Copiar como comando ffmpeg (contenedor correcto según content-type)
-- Ver los segmentos de una playlist m3u8 parseada (abre `M3u8Dialog`)
-- Doble-click: m3u8 → ver segmentos; otro → copiar ffmpeg
-- Botón "Limpiar panel" para vaciarlo sin afectar la captura principal
-"""
+"""Panel de enlaces multimedia detectados en las capturas."""
 
 from __future__ import annotations
 
@@ -18,11 +8,13 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -32,15 +24,17 @@ from PySide6.QtWidgets import (
 
 from streaminspector.core.events import HttpFlowCaptured
 from streaminspector.media_utils import (
+    ReproducibleLinkInfo,
     build_ffmpeg_command,
+    build_reproducible_link_info,
+    decode_response_body,
     is_m3u8_response,
     is_video_url,
+    parse_m3u8,
 )
 
 
 class VideoLinksPanel(QWidget):
-    """Lista de streams de vídeo/audio extraídos de los flows del MainWindow."""
-
     def __init__(
         self,
         flows_provider: Callable[[], list[HttpFlowCaptured]],
@@ -56,7 +50,6 @@ class VideoLinksPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        # Cabecera con contador
         header_layout = QHBoxLayout()
         self.header_label = QLabel("Streams de vídeo (0)")
         self.header_label.setStyleSheet("color: #6dd58c; font-weight: bold;")
@@ -67,11 +60,8 @@ class VideoLinksPanel(QWidget):
         header_layout.addWidget(self.summary_label)
         layout.addLayout(header_layout)
 
-        # Tabla: 5 columnas. URL es la principal (stretch).
         self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(
-            ["#", "Método", "Estado", "Tipo", "URL"]
-        )
+        self.table.setHorizontalHeaderLabels(["#", "Método", "Estado", "Tipo", "URL"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -88,18 +78,16 @@ class VideoLinksPanel(QWidget):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.table)
 
-        # Botones de acción sobre la fila seleccionada
         button_layout = QHBoxLayout()
-
-        # "Probar en navegador" va primero: es la acción más rápida para
-        # ver si el stream funciona. Abre la URL en el navegador por defecto
-        # del sistema; si el usuario tiene el navegador dedicado abierto
-        # (Proxy > Abrir navegador dedicado…), la URL se puede abrir
-        # también ahí para ver el tráfico capturado.
         self.play_button = QPushButton("▶ Probar en navegador")
         self.play_button.clicked.connect(self._open_selected_in_browser)
         self.play_button.setEnabled(False)
         button_layout.addWidget(self.play_button)
+
+        self.reproducible_button = QPushButton("Obtener enlace reproducible")
+        self.reproducible_button.clicked.connect(self._obtain_reproducible_link)
+        self.reproducible_button.setEnabled(False)
+        button_layout.addWidget(self.reproducible_button)
 
         self.copy_url_button = QPushButton("Copiar URL")
         self.copy_url_button.clicked.connect(self._copy_selected_url)
@@ -117,29 +105,22 @@ class VideoLinksPanel(QWidget):
         button_layout.addWidget(self.view_m3u8_button)
 
         button_layout.addStretch(1)
-
         self.clear_button = QPushButton("Limpiar panel")
         self.clear_button.clicked.connect(self._clear_panel)
         button_layout.addWidget(self.clear_button)
-
         layout.addLayout(button_layout)
 
-    # ------------------------------------------------------------------ refresh
-
     def refresh(self) -> None:
-        """Reconstruye la tabla leyendo los flows actuales.
-
-        Se llama desde el MainWindow tras cada `_append_flow` o `_clear_view`.
-        Dedupa por URL (las playlists m3u8 se relisten cada pocos segundos
-        en vivo, no queremos duplicados visuales).
-        """
-        flows = self._flows_provider()
         video_flows: list[HttpFlowCaptured] = []
         seen_urls: set[str] = set()
-        for flow in flows:
+        for flow in self._flows_provider():
             if not (
                 is_video_url(flow.url, flow.content_type)
-                or is_m3u8_response(flow.content_type, flow.response_body)
+                or is_m3u8_response(
+                    flow.content_type,
+                    flow.response_body,
+                    flow.response_headers,
+                )
             ):
                 continue
             if flow.url in seen_urls:
@@ -147,22 +128,18 @@ class VideoLinksPanel(QWidget):
             seen_urls.add(flow.url)
             video_flows.append(flow)
 
-        # Cabecera: total + desglose por tipo (m3u8, mp4, ts, etc.)
         self.header_label.setText(f"Streams de vídeo ({len(video_flows)})")
         if video_flows:
             counts: dict[str, int] = {}
             for flow in video_flows:
                 key = self._classify(flow)
                 counts[key] = counts.get(key, 0) + 1
-            breakdown = ", ".join(
-                f"{count} {kind}" for kind, count in sorted(counts.items())
+            self.summary_label.setText(
+                ", ".join(f"{count} {kind}" for kind, count in sorted(counts.items()))
             )
-            self.summary_label.setText(breakdown)
         else:
             self.summary_label.setText("")
 
-        # Repintar la tabla con sorting deshabilitado para que el orden
-        # de inserción sea el orden de pintado.
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(video_flows))
         self._flow_by_url.clear()
@@ -177,8 +154,7 @@ class VideoLinksPanel(QWidget):
                 font.setBold(True)
                 status_item.setFont(font)
             self.table.setItem(row, 2, status_item)
-            tipo = self._classify(flow)
-            self.table.setItem(row, 3, QTableWidgetItem(tipo))
+            self.table.setItem(row, 3, QTableWidgetItem(self._classify(flow)))
             url_item = QTableWidgetItem(flow.url)
             url_item.setToolTip(flow.url)
             self.table.setItem(row, 4, url_item)
@@ -187,8 +163,11 @@ class VideoLinksPanel(QWidget):
 
     @staticmethod
     def _classify(flow: HttpFlowCaptured) -> str:
-        """Etiqueta corta para la columna 'Tipo' (m3u8, mp4, ts, etc.)."""
-        if is_m3u8_response(flow.content_type, flow.response_body):
+        if is_m3u8_response(
+            flow.content_type,
+            flow.response_body,
+            flow.response_headers,
+        ):
             return "m3u8"
         lower = flow.url.lower().split("?", 1)[0]
         for ext in (
@@ -205,79 +184,90 @@ class VideoLinksPanel(QWidget):
         ):
             if lower.endswith(ext):
                 return ext.lstrip(".")
-        ct = flow.content_type.split(";", 1)[0].strip()
-        return ct or "?"
-
-    # ----------------------------------------------------------------- acciones
+        return flow.content_type.split(";", 1)[0].strip() or "?"
 
     def _selected_flow(self) -> HttpFlowCaptured | None:
         row = self.table.currentRow()
         if row < 0:
             return None
-        url_item = self.table.item(row, 4)
-        if url_item is None:
-            return None
-        url = url_item.text()
-        return self._flow_by_url.get(url)
+        item = self.table.item(row, 4)
+        return self._flow_by_url.get(item.text()) if item is not None else None
 
     def _copy_selected_url(self) -> None:
         flow = self._selected_flow()
         if flow is None:
-            QMessageBox.information(
-                self, "Copiar URL", "Selecciona un stream primero."
-            )
+            QMessageBox.information(self, "Copiar URL", "Selecciona un stream primero.")
             return
         QApplication.clipboard().setText(flow.url)
 
     def _copy_selected_ffmpeg(self) -> None:
         flow = self._selected_flow()
         if flow is None:
-            QMessageBox.information(
-                self, "Copiar ffmpeg", "Selecciona un stream primero."
-            )
+            QMessageBox.information(self, "Copiar ffmpeg", "Selecciona un stream primero.")
             return
         QApplication.clipboard().setText(
-            build_ffmpeg_command(
-                flow.url, flow.content_type, flow.request_headers
-            )
+            build_ffmpeg_command(flow.url, flow.content_type, flow.request_headers)
         )
+
+    def _playlist_for_flow(self, flow: HttpFlowCaptured):
+        if not is_m3u8_response(
+            flow.content_type,
+            flow.response_body,
+            flow.response_headers,
+        ):
+            return None
+        body = decode_response_body(flow.response_body, flow.response_headers)
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return parse_m3u8(text, base_url=flow.url)
 
     def _view_selected_m3u8(self) -> None:
         flow = self._selected_flow()
-        if flow is None or not is_m3u8_response(
-            flow.content_type, flow.response_body
-        ):
+        if flow is None:
+            return
+        playlist = self._playlist_for_flow(flow)
+        if playlist is None:
             return
         from streaminspector.gui.m3u8_dialog import M3u8Dialog
-        from streaminspector.media_utils import parse_m3u8
 
-        text = flow.response_body.decode("utf-8", errors="replace")
-        playlist = parse_m3u8(text, base_url=flow.url)
-        dialog = M3u8Dialog(playlist, flow.url, self)
+        dialog = M3u8Dialog(
+            playlist,
+            flow.url,
+            self,
+            request_headers=flow.request_headers,
+        )
         dialog.show()
 
-    def _open_selected_in_browser(self) -> None:
-        """Abre la URL seleccionada en el navegador por defecto del sistema.
-
-        Si el proxy está activo y el navegador del sistema respeta el
-        proxy de Windows, el tráfico se captura. Si el usuario tiene el
-        navegador dedicado abierto (Proxy > Abrir navegador dedicado…),
-        también puede abrir la URL ahí copiándola en su barra de
-        direcciones, y el tráfico queda igualmente capturado.
-
-        Para m3u8 el navegador carga el manifest y empieza a pedir
-        segmentos. Para mp4/webm suele reproducir directamente. Para
-        segmentos sueltos (.ts, .m4s) el navegador descarga el archivo
-        en lugar de reproducirlo — eso es esperado, son los trozos.
-        """
+    def _obtain_reproducible_link(self) -> None:
         flow = self._selected_flow()
         if flow is None:
             QMessageBox.information(
-                self, "Probar en navegador", "Selecciona un stream primero."
+                self,
+                "Obtener enlace reproducible",
+                "Selecciona un stream primero.",
             )
             return
-        ok = QDesktopServices.openUrl(QUrl(flow.url))
-        if not ok:
+        playlist = self._playlist_for_flow(flow)
+        info = build_reproducible_link_info(
+            flow.url,
+            playlist,
+            flow.request_headers,
+        )
+        QApplication.clipboard().setText(info.url)
+        ReproducibleLinkDialog(info, self).exec()
+
+    def _open_selected_in_browser(self) -> None:
+        flow = self._selected_flow()
+        if flow is None:
+            QMessageBox.information(
+                self,
+                "Probar en navegador",
+                "Selecciona un stream primero.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl(flow.url)):
             QMessageBox.warning(
                 self,
                 "No se pudo abrir el navegador",
@@ -288,27 +278,22 @@ class VideoLinksPanel(QWidget):
         flow = self._selected_flow()
         if flow is None:
             return
-        if is_m3u8_response(flow.content_type, flow.response_body):
+        if self._playlist_for_flow(flow) is not None:
             self._view_selected_m3u8()
         else:
             self._copy_selected_ffmpeg()
 
     def _update_button_state(self) -> None:
         flow = self._selected_flow()
-        self.play_button.setEnabled(flow is not None)
-        self.copy_url_button.setEnabled(flow is not None)
-        self.copy_ffmpeg_button.setEnabled(flow is not None)
-        self.view_m3u8_button.setEnabled(
-            flow is not None
-            and is_m3u8_response(flow.content_type, flow.response_body)
-        )
+        selected = flow is not None
+        is_m3u8 = selected and self._playlist_for_flow(flow) is not None
+        self.play_button.setEnabled(selected)
+        self.reproducible_button.setEnabled(selected)
+        self.copy_url_button.setEnabled(selected)
+        self.copy_ffmpeg_button.setEnabled(selected)
+        self.view_m3u8_button.setEnabled(bool(is_m3u8))
 
     def _clear_panel(self) -> None:
-        """Vacía la tabla. La captura principal (self._flows) no se toca.
-
-        Útil cuando el usuario quiere centrarse en un subconjunto sin
-        perder los flows ya capturados.
-        """
         self._flow_by_url.clear()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
@@ -321,13 +306,84 @@ class VideoLinksPanel(QWidget):
         if flow is None:
             return
         menu = QMenu(self)
-        play_action = menu.addAction("▶ Probar en navegador")
-        play_action.triggered.connect(self._open_selected_in_browser)
-        copy_url = menu.addAction("Copiar URL")
-        copy_url.triggered.connect(self._copy_selected_url)
-        copy_ffmpeg = menu.addAction("Copiar como ffmpeg")
-        copy_ffmpeg.triggered.connect(self._copy_selected_ffmpeg)
-        if is_m3u8_response(flow.content_type, flow.response_body):
-            view_m3u8 = menu.addAction("Ver segmentos m3u8")
-            view_m3u8.triggered.connect(self._view_selected_m3u8)
+        menu.addAction("▶ Probar en navegador").triggered.connect(
+            self._open_selected_in_browser
+        )
+        menu.addAction("Obtener enlace reproducible").triggered.connect(
+            self._obtain_reproducible_link
+        )
+        menu.addAction("Copiar URL").triggered.connect(self._copy_selected_url)
+        menu.addAction("Copiar como ffmpeg").triggered.connect(
+            self._copy_selected_ffmpeg
+        )
+        if self._playlist_for_flow(flow) is not None:
+            menu.addAction("Ver segmentos m3u8").triggered.connect(
+                self._view_selected_m3u8
+            )
         menu.exec(self.table.viewport().mapToGlobal(position))
+
+
+class ReproducibleLinkDialog(QDialog):
+    def __init__(self, info: ReproducibleLinkInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._info = info
+        self.setWindowTitle("Enlace reproducible")
+        self.resize(820, 520)
+        layout = QVBoxLayout(self)
+
+        if info.selected_variant is not None:
+            variant = info.selected_variant
+            selected_text = "Mejor variante seleccionada"
+            if variant.resolution:
+                selected_text += f": {variant.resolution}"
+            if variant.bandwidth:
+                selected_text += f" · {variant.bandwidth} bps"
+            layout.addWidget(QLabel(selected_text))
+
+        if info.appears_temporary:
+            warning = QLabel("⚠ La URL parece firmada o temporal y puede caducar.")
+            warning.setWordWrap(True)
+            layout.addWidget(warning)
+
+        headers = ", ".join(info.required_headers) or "Ninguna cabecera especial detectada"
+        layout.addWidget(QLabel(f"Cabeceras recomendadas: {headers}"))
+        if info.sensitive_headers:
+            layout.addWidget(
+                QLabel(
+                    "Cabeceras sensibles disponibles: "
+                    + ", ".join(info.sensitive_headers)
+                    + ". No se incluyen automáticamente."
+                )
+            )
+
+        layout.addWidget(QLabel("URL reproducible (copiada al portapapeles):"))
+        url_edit = QPlainTextEdit(info.url)
+        url_edit.setReadOnly(True)
+        url_edit.setFixedHeight(90)
+        layout.addWidget(url_edit)
+
+        layout.addWidget(QLabel("Comando ffmpeg:"))
+        command_edit = QPlainTextEdit(info.command)
+        command_edit.setReadOnly(True)
+        command_edit.setFixedHeight(130)
+        layout.addWidget(command_edit)
+
+        if info.warnings:
+            notes = QLabel("\n".join(f"• {warning}" for warning in info.warnings))
+            notes.setWordWrap(True)
+            layout.addWidget(notes)
+
+        buttons = QHBoxLayout()
+        copy_url = QPushButton("Copiar URL")
+        copy_url.clicked.connect(lambda: QApplication.clipboard().setText(info.url))
+        buttons.addWidget(copy_url)
+        copy_command = QPushButton("Copiar ffmpeg")
+        copy_command.clicked.connect(
+            lambda: QApplication.clipboard().setText(info.command)
+        )
+        buttons.addWidget(copy_command)
+        buttons.addStretch(1)
+        close = QPushButton("Cerrar")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)

@@ -152,6 +152,14 @@ El menú `Exportar` genera:
 
 El menú `Análisis` muestra métricas de rendimiento, errores, tiempos de respuesta, tamaños, dominios y familias de estado.
 
+## Obtener un enlace reproducible
+
+En el panel `Streams de vídeo`, selecciona una captura y pulsa `Obtener enlace reproducible`.
+
+La acción descomprime respuestas gzip, deflate y Brotli, analiza la playlist HLS y, si es una playlist maestra, selecciona automáticamente la variante con mayor ancho de banda, resolución y frecuencia de imagen. También copia la URL seleccionada, genera un comando ffmpeg con User-Agent, Referer y Origin, indica si existen Cookie o Authorization y avisa cuando la URL parece firmada o temporal.
+
+Las credenciales sensibles no se incluyen automáticamente en el comando.
+
 ## Asistente integrado
 
 En la primera ejecución se abre una guía. También puede abrirse desde:

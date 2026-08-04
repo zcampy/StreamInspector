@@ -1,28 +1,19 @@
-"""Utilidades para detectar y manejar URLs de vídeo/audio en streams.
-
-Pensado para cazar los `.m3u8`/`.mp4`/DASH que los streamers esconden en
-su HTML/JS y que solo aparecen como una request más en la captura. Una vez
-identificada la URL, `build_ffmpeg_command` la convierte en un comando
-copiable para descargar el stream con ffmpeg.
-"""
+"""Detección, análisis y generación de comandos para streams multimedia."""
 
 from __future__ import annotations
 
 import contextlib
+import gzip
 import re
+import zlib
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
-# Content-Types que identifican streams de vídeo o audio. La lista es
-# deliberadamente laxa: si parece vídeo, lo marcamos.
 VIDEO_CONTENT_TYPES: frozenset[str] = frozenset(
     {
-        # HLS (Apple HTTP Live Streaming)
         "application/vnd.apple.mpegurl",
         "application/x-mpegurl",
-        # MPEG-DASH
         "application/dash+xml",
-        # Progressive download
         "video/mp4",
         "video/webm",
         "video/quicktime",
@@ -31,10 +22,8 @@ VIDEO_CONTENT_TYPES: frozenset[str] = frozenset(
         "video/x-flv",
         "video/3gpp",
         "video/ogg",
-        # Segmentos sueltos (no es playlist pero sí vídeo)
         "video/mp2t",
         "video/mp1s",
-        # Audio-only streams (algunos streamers los usan para radio/podcast)
         "audio/mpeg",
         "audio/aac",
         "audio/ogg",
@@ -43,8 +32,6 @@ VIDEO_CONTENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Substrings en la URL que también indican contenido multimedia, por si el
-# servidor no envía Content-Type correcto (passes HLS sin mimetype, etc.).
 VIDEO_PATH_HINTS: tuple[str, ...] = (
     ".m3u8",
     ".m3u",
@@ -62,86 +49,186 @@ VIDEO_PATH_HINTS: tuple[str, ...] = (
     ".mkv",
 )
 
+_TEMPORARY_QUERY_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "auth",
+        "key",
+        "sig",
+        "signature",
+        "expires",
+        "expiry",
+        "exp",
+        "session",
+        "jwt",
+        "_ver",
+        "_ctump",
+        "_ctuph",
+        "_ctutt",
+        "_s1",
+        "_s2",
+    }
+)
+_TEMPORARY_PATH_RE = re.compile(r"(?i)/(?:token|auth|session|key)[-_][^/?#]+")
+
 
 def is_video_content_type(content_type: str) -> bool:
-    """True si el Content-Type indica un stream de vídeo o audio."""
     if not content_type:
         return False
     mime = content_type.split(";", 1)[0].strip().lower()
     return mime in VIDEO_CONTENT_TYPES or mime.startswith(("video/", "audio/"))
 
 
+def _url_path(url: str) -> str:
+    try:
+        return urlsplit(url).path.lower()
+    except ValueError:
+        return url.lower()
+
+
 def is_video_url(url: str, content_type: str = "") -> bool:
-    """True si la URL o su Content-Type sugieren un stream multimedia."""
     if is_video_content_type(content_type):
         return True
-    lower = url.lower()
-    return any(hint in lower for hint in VIDEO_PATH_HINTS)
+    path = _url_path(url)
+    return any(hint in path for hint in VIDEO_PATH_HINTS)
 
 
-def is_m3u8_response(content_type: str, body: bytes) -> bool:
-    """True si la respuesta es una playlist HLS (m3u8)."""
+def _header_value(
+    headers: tuple[tuple[str, str], ...] | None,
+    name: str,
+) -> str:
+    target = name.lower()
+    for header_name, value in headers or ():
+        if header_name.lower() == target:
+            return value
+    return ""
+
+
+def decode_response_body(
+    body: bytes,
+    response_headers: tuple[tuple[str, str], ...] | None = None,
+) -> bytes:
+    """Decodifica gzip, deflate o Brotli sin destruir el original si falla."""
+    encoding = _header_value(response_headers, "content-encoding").lower().strip()
+    if not body or not encoding or encoding == "identity":
+        return body
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            try:
+                return zlib.decompress(body)
+            except zlib.error:
+                return zlib.decompress(body, -zlib.MAX_WBITS)
+        if encoding == "br":
+            import brotli
+
+            return brotli.decompress(body)
+    except (OSError, ValueError, zlib.error):
+        return body
+    return body
+
+
+def is_m3u8_response(
+    content_type: str,
+    body: bytes,
+    response_headers: tuple[tuple[str, str], ...] | None = None,
+) -> bool:
     if is_video_content_type(content_type) and "mpegurl" in content_type.lower():
         return True
-    # Sin Content-Type fiable, miramos la firma del cuerpo.
-    if not body:
+    decoded = decode_response_body(body, response_headers)
+    if not decoded:
         return False
-    head = body[:64].lstrip().decode("utf-8", errors="replace")
+    try:
+        head = decoded[:64].lstrip().decode("utf-8")
+    except UnicodeDecodeError:
+        return False
     return head.startswith("#EXTM3U")
-
-
-# ---------------------------------------------------------------- m3u8 parser
 
 
 @dataclass(frozen=True, slots=True)
 class M3u8Segment:
-    """Un segmento de una playlist HLS."""
-
     url: str
-    duration: float | None  # segundos; None si el #EXTINF no estaba
+    duration: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class M3u8Variant:
+    url: str
+    bandwidth: int | None = None
+    resolution: str | None = None
+    codecs: str | None = None
+    frame_rate: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class M3u8Playlist:
-    """Playlist HLS parseada.
-
-    `segments` está en el orden en que aparecen en el fichero original.
-    `total_duration` es la suma de las duraciones de los segmentos; si algún
-    segmento no tenía #EXTINF, se cuenta como 0.
-    """
-
     version: int | None = None
     target_duration: int | None = None
-    is_master: bool = False  # contiene #EXT-X-STREAM-INF (master playlist)
-    is_live: bool = False    # NO contiene #EXT-X-ENDLIST
+    is_master: bool = False
+    is_live: bool | None = None
     segments: tuple[M3u8Segment, ...] = field(default_factory=tuple)
+    variants: tuple[M3u8Variant, ...] = field(default_factory=tuple)
     raw_lines: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def total_duration(self) -> float:
-        return sum(s.duration or 0.0 for s in self.segments)
+        return sum(segment.duration or 0.0 for segment in self.segments)
 
     @property
     def segment_count(self) -> int:
         return len(self.segments)
 
 
+@dataclass(frozen=True, slots=True)
+class ReproducibleLinkInfo:
+    url: str
+    command: str
+    selected_variant: M3u8Variant | None
+    required_headers: tuple[str, ...]
+    sensitive_headers: tuple[str, ...]
+    appears_temporary: bool
+    warnings: tuple[str, ...]
+
+
 _EXTINF_RE = re.compile(r"#EXTINF:\s*([0-9.]+)")
+_ATTRIBUTE_RE = re.compile(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)')
+
+
+def _parse_stream_attributes(line: str) -> dict[str, str]:
+    _, _, raw = line.partition(":")
+    result: dict[str, str] = {}
+    for key, value in _ATTRIBUTE_RE.findall(raw):
+        result[key] = value.strip().strip('"')
+    return result
+
+
+def _optional_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    with contextlib.suppress(ValueError):
+        return int(value)
+    return None
+
+
+def _optional_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    with contextlib.suppress(ValueError):
+        return float(value)
+    return None
 
 
 def parse_m3u8(text: str, base_url: str = "") -> M3u8Playlist:
-    """Parsea una playlist HLS (m3u8) y devuelve sus segmentos.
-
-    Si se pasa `base_url`, los segmentos con URL relativa se resuelven contra
-    ella (típicamente la URL del propio .m3u8).
-    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     version: int | None = None
     target_duration: int | None = None
-    is_master = False
-    is_live = True
+    has_endlist = False
     segments: list[M3u8Segment] = []
+    variants: list[M3u8Variant] = []
     pending_duration: float | None = None
+    pending_variant: dict[str, str] | None = None
 
     for line in lines:
         if line.startswith("#EXT-X-VERSION:"):
@@ -151,55 +238,94 @@ def parse_m3u8(text: str, base_url: str = "") -> M3u8Playlist:
             with contextlib.suppress(ValueError):
                 target_duration = int(line.split(":", 1)[1].strip())
         elif line.startswith("#EXT-X-STREAM-INF"):
-            is_master = True
-            is_live = False  # master playlists son VOD por definición
+            pending_variant = _parse_stream_attributes(line)
         elif line.startswith("#EXTINF:"):
             match = _EXTINF_RE.match(line)
             pending_duration = float(match.group(1)) if match else None
         elif line.startswith("#EXT-X-ENDLIST"):
-            is_live = False
+            has_endlist = True
         elif not line.startswith("#"):
-            # Línea de URL. Si la anterior era #EXTINF, esa es su duración.
-            url = urljoin(base_url, line) if base_url else line
-            segments.append(M3u8Segment(url=url, duration=pending_duration))
-            pending_duration = None
+            resolved = urljoin(base_url, line) if base_url else line
+            if pending_variant is not None:
+                variants.append(
+                    M3u8Variant(
+                        url=resolved,
+                        bandwidth=_optional_int(pending_variant.get("BANDWIDTH")),
+                        resolution=pending_variant.get("RESOLUTION"),
+                        codecs=pending_variant.get("CODECS"),
+                        frame_rate=_optional_float(pending_variant.get("FRAME-RATE")),
+                    )
+                )
+                pending_variant = None
+            else:
+                segments.append(M3u8Segment(url=resolved, duration=pending_duration))
+                pending_duration = None
 
+    is_master = bool(variants)
+    is_live: bool | None = None if is_master else not has_endlist
     return M3u8Playlist(
         version=version,
         target_duration=target_duration,
         is_master=is_master,
         is_live=is_live,
         segments=tuple(segments),
+        variants=tuple(variants),
         raw_lines=tuple(lines),
     )
 
 
-# ---------------------------------------------------------------- ffmpeg
+def _resolution_pixels(resolution: str | None) -> int:
+    if not resolution or "x" not in resolution.lower():
+        return 0
+    width, _, height = resolution.lower().partition("x")
+    try:
+        return int(width) * int(height)
+    except ValueError:
+        return 0
 
 
-# User-Agent por defecto: un Chrome reciente. Sin esto muchos CDNs
-# (Cloudflare, etc.) rechazan la request de ffmpeg porque su UA por
-# defecto ("Lavf/...") es identificable como herramienta.
+def select_best_variant(playlist: M3u8Playlist) -> M3u8Variant | None:
+    """Selecciona mayor BANDWIDTH y usa resolución como segundo criterio."""
+    if not playlist.variants:
+        return None
+    return max(
+        playlist.variants,
+        key=lambda variant: (
+            variant.bandwidth or 0,
+            _resolution_pixels(variant.resolution),
+            variant.frame_rate or 0.0,
+        ),
+    )
+
+
+def appears_temporary_or_signed(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    query_names = {name.lower() for name, _ in parse_qsl(parsed.query)}
+    return bool(query_names & _TEMPORARY_QUERY_NAMES) or bool(
+        _TEMPORARY_PATH_RE.search(parsed.path)
+    )
+
+
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 
-def _extract_referer_and_ua(
+def _extract_command_headers(
     request_headers: tuple[tuple[str, str], ...] | None,
-) -> tuple[str | None, str | None]:
-    """Saca `Referer` y `User-Agent` de los headers del request original.
-
-    Muchos streams protegidos validan el `Referer` y/o el `User-Agent`
-    del cliente. Si los capturamos, el comando ffmpeg que copiamos puede
-    reutilizarlos y la descarga funciona a la primera.
-    """
-    if not request_headers:
-        return None, None
-    referer: str | None = None
-    user_agent: str | None = None
-    for name, value in request_headers:
+    *,
+    include_sensitive_headers: bool,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    referer = None
+    user_agent = None
+    origin = None
+    cookie = None
+    authorization = None
+    for name, value in request_headers or ():
         if not name or not value:
             continue
         lower = name.lower()
@@ -207,30 +333,50 @@ def _extract_referer_and_ua(
             referer = value
         elif lower == "user-agent" and user_agent is None:
             user_agent = value
-    return referer, user_agent
+        elif lower == "origin" and origin is None:
+            origin = value
+        elif include_sensitive_headers and lower == "cookie" and cookie is None:
+            cookie = value
+        elif (
+            include_sensitive_headers
+            and lower == "authorization"
+            and authorization is None
+        ):
+            authorization = value
+    return referer, user_agent, origin, cookie, authorization
+
+
+def _escape_command_value(value: str) -> str:
+    return value.replace('"', '\\"')
 
 
 def _format_ffmpeg_prefix(
     url: str,
     request_headers: tuple[tuple[str, str], ...] | None = None,
+    *,
+    include_sensitive_headers: bool = False,
 ) -> str:
-    """Construye el prefijo del comando ffmpeg con headers y URL.
-
-    Devuelve algo como:
-        ffmpeg -hide_banner -loglevel error -user_agent "..." \\
-            -headers "Referer: ...\r\n" -i "URL"
-    """
-    referer, user_agent = _extract_referer_and_ua(request_headers)
-    ua = user_agent or _DEFAULT_USER_AGENT
-    safe_ua = ua.replace('"', '\\"')
+    referer, user_agent, origin, cookie, authorization = _extract_command_headers(
+        request_headers,
+        include_sensitive_headers=include_sensitive_headers,
+    )
     parts = [
         "ffmpeg -hide_banner -loglevel error",
-        f'-user_agent "{safe_ua}"',
+        f'-user_agent "{_escape_command_value(user_agent or _DEFAULT_USER_AGENT)}"',
     ]
+    extra_headers: list[str] = []
     if referer:
-        safe_referer = referer.replace('"', '\\"')
-        parts.append(f'-headers "Referer: {safe_referer}\\r\\n"')
-    parts.append(f'-i "{url.replace(chr(34), chr(92) + chr(34))}"')
+        extra_headers.append(f"Referer: {referer}")
+    if origin:
+        extra_headers.append(f"Origin: {origin}")
+    if cookie:
+        extra_headers.append(f"Cookie: {cookie}")
+    if authorization:
+        extra_headers.append(f"Authorization: {authorization}")
+    if extra_headers:
+        joined = "\\r\\n".join(_escape_command_value(item) for item in extra_headers)
+        parts.append(f'-headers "{joined}\\r\\n"')
+    parts.append(f'-i "{_escape_command_value(url)}"')
     return " ".join(parts)
 
 
@@ -238,56 +384,84 @@ def build_ffmpeg_command(
     url: str,
     content_type: str = "",
     request_headers: tuple[tuple[str, str], ...] | None = None,
+    *,
+    include_sensitive_headers: bool = False,
 ) -> str:
-    """Genera un comando ffmpeg de UNA línea para capturar la URL.
-
-    Para m3u8 (HLS) usamos `-c copy` con `.ts` como contenedor — el más
-    universal. Para mp4/webm y similares, el contenedor se infiere del
-    content-type o de la extensión de la URL.
-
-    Si se pasan `request_headers` (los headers del request original
-    capturado por el proxy), se extraen `Referer` y `User-Agent` y se
-    incluyen en el comando. Esto es CRÍTICO para los streams protegidos
-    de sitios como fctv33hd / adair.sworfa.kdns.fr que validan el
-    Referer — sin él, ffmpeg recibe 403.
-
-    Las comillas dobles en la URL y headers se escapan para que el comando
-    resultante sea seguro de pegar en PowerShell o bash sin que rompa la
-    sintaxis.
-
-    Fallback: cuando ni el content-type ni la extensión aclaran el formato
-    (típico en streams obfuscados: el servidor devuelve
-    `application/octet-stream` y la URL acaba en `.doc` u otra extensión
-    falsa), usamos `.mp4` porque es el contenedor más universal y lo abren
-    todos los players. Antes caíamos a `output.bin`, que ningún player
-    abre directamente.
-    """
-    prefix = _format_ffmpeg_prefix(url, request_headers)
+    """Genera un comando ffmpeg; cookies/auth solo se incluyen con opt-in."""
+    prefix = _format_ffmpeg_prefix(
+        url,
+        request_headers,
+        include_sensitive_headers=include_sensitive_headers,
+    )
     lower_ct = content_type.lower() if content_type else ""
-    lower_url = url.lower()
-    if "mpegurl" in lower_ct or lower_url.endswith((".m3u8", ".m3u")):
+    path = _url_path(url)
+
+    if "mpegurl" in lower_ct or path.endswith((".m3u8", ".m3u")):
         return f"{prefix} -c copy -bsf:a aac_adtstoasc output.ts"
-    if "dash" in lower_ct or lower_url.endswith(".mpd"):
+    if "dash" in lower_ct or path.endswith(".mpd"):
         return f"{prefix} -c copy -bsf:a aac_adtstoasc output.mp4"
-    if "mp4" in lower_ct or lower_url.endswith((
-        ".mp4",
-        ".m4s",   # segmento DASH
-        ".mov",
-        ".ism",
-        ".ism/manifest",  # SmoothStreaming
-        ".f4m",   # HDS Flash
-    )):
+    if "mp4" in lower_ct or path.endswith(
+        (".mp4", ".m4s", ".mov", ".ism", ".ism/manifest", ".f4m")
+    ):
         return f"{prefix} -c copy output.mp4"
-    if "webm" in lower_ct or lower_url.endswith(".webm"):
+    if "webm" in lower_ct or path.endswith(".webm"):
         return f"{prefix} -c copy output.webm"
-    if "matroska" in lower_ct or lower_url.endswith(".mkv"):
+    if "matroska" in lower_ct or path.endswith(".mkv"):
         return f"{prefix} -c copy output.mkv"
-    if "flv" in lower_ct or lower_url.endswith(".flv"):
+    if "flv" in lower_ct or path.endswith(".flv"):
         return f"{prefix} -c copy output.flv"
-    if "3gpp" in lower_ct or lower_url.endswith(".3gp"):
+    if "3gpp" in lower_ct or path.endswith(".3gp"):
         return f"{prefix} -c copy output.3gp"
-    if lower_url.endswith(".ts"):
+    if path.endswith(".ts"):
         return f"{prefix} -c copy output.ts"
-    # Fallback universal: cualquier stream que no pudimos clasificar va a
-    # .mp4 (en lugar del antiguo .bin que ningún player abría).
     return f"{prefix} -c copy output.mp4"
+
+
+def build_reproducible_link_info(
+    source_url: str,
+    playlist: M3u8Playlist | None,
+    request_headers: tuple[tuple[str, str], ...] | None = None,
+    *,
+    include_sensitive_headers: bool = False,
+) -> ReproducibleLinkInfo:
+    selected = select_best_variant(playlist) if playlist is not None else None
+    playable_url = selected.url if selected is not None else source_url
+    present = {name.lower() for name, value in request_headers or () if value}
+    required = tuple(
+        label
+        for header, label in (
+            ("referer", "Referer"),
+            ("origin", "Origin"),
+            ("user-agent", "User-Agent"),
+        )
+        if header in present
+    )
+    sensitive = tuple(
+        label
+        for header, label in (("cookie", "Cookie"), ("authorization", "Authorization"))
+        if header in present
+    )
+    temporary = appears_temporary_or_signed(playable_url)
+    warnings: list[str] = []
+    if temporary:
+        warnings.append("La URL parece firmada o temporal y puede caducar.")
+    if sensitive and not include_sensitive_headers:
+        warnings.append(
+            "La captura contiene Cookie/Authorization; actívalas solo si el servidor las exige."
+        )
+    if selected is not None:
+        warnings.append("Se seleccionó automáticamente la variante de mayor calidad.")
+    return ReproducibleLinkInfo(
+        url=playable_url,
+        command=build_ffmpeg_command(
+            playable_url,
+            "application/vnd.apple.mpegurl",
+            request_headers,
+            include_sensitive_headers=include_sensitive_headers,
+        ),
+        selected_variant=selected,
+        required_headers=required,
+        sensitive_headers=sensitive,
+        appears_temporary=temporary,
+        warnings=tuple(warnings),
+    )
