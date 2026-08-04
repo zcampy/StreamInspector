@@ -52,6 +52,7 @@ class CapturedFlow(Base):
     response_headers_json: Mapped[str] = mapped_column(Text, default="[]")
     request_body: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
     response_body: Mapped[bytes] = mapped_column(LargeBinary, default=b"")
+    request_size: Mapped[int] = mapped_column(Integer, default=0)
     response_size: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 

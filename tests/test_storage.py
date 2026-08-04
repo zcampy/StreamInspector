@@ -85,3 +85,93 @@ def test_storage_deletes_only_inactive_session(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="activa"):
         storage.delete_session(storage.active_session_id)
     storage.close()
+
+
+def test_storage_migrates_existing_db_adding_request_size(tmp_path: Path) -> None:
+    """BDs creadas antes de añadir `request_size` deben actualizarse sin perder datos."""
+    from sqlalchemy import create_engine, text
+
+    database = tmp_path / "legacy.sqlite3"
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.begin() as conn:
+        # Esquema "antiguo" sin request_size.
+        conn.execute(
+            text(
+                "CREATE TABLE captured_flows ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "flow_id VARCHAR(64) UNIQUE, "
+                "captured_at DATETIME, "
+                "method VARCHAR(16), "
+                "scheme VARCHAR(16), "
+                "host VARCHAR(255), "
+                "port INTEGER, "
+                "path TEXT, "
+                "url TEXT, "
+                "http_version VARCHAR(32), "
+                "status_code INTEGER, "
+                "reason VARCHAR(255), "
+                "content_type VARCHAR(255), "
+                "request_headers_json TEXT, "
+                "response_headers_json TEXT, "
+                "request_body BLOB, "
+                "response_body BLOB, "
+                "response_size INTEGER, "
+                "duration_ms FLOAT"
+                ")"
+            )
+        )
+
+    event_bus = EventBus()
+    storage = StorageService(event_bus, database)
+    try:
+        # El esquema nuevo debe tener la columna tras la migración.
+        with storage._engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(captured_flows)")).all()
+            }
+        assert "request_size" in columns
+
+        # Persistir un flow usa el campo sin error.
+        storage._store_flow(
+            HttpFlowCaptured(
+                flow_id="legacy-1",
+                method="GET",
+                host="legacy.example",
+                url="https://legacy.example/",
+                path="/",
+                request_body=b"hi",
+                response_body=b"{}",
+                request_size=2,
+                response_size=2,
+            )
+        )
+        restored = storage.recent_events(limit=5)
+        assert len(restored) == 1
+        assert restored[0].request_size == 2
+    finally:
+        storage.close()
+
+
+def test_storage_persists_request_size_round_trip(tmp_path: Path) -> None:
+    event_bus = EventBus()
+    storage = StorageService(event_bus, tmp_path / "sessions.sqlite3")
+    try:
+        event_bus.publish(
+            HttpFlowCaptured(
+                flow_id="size-1",
+                method="POST",
+                host="api.example",
+                url="https://api.example/v1",
+                path="/v1",
+                request_body=b"payload",
+                response_body=b"{}",
+                request_size=7,
+                response_size=2,
+            )
+        )
+        restored = storage.recent_events(limit=5)
+        assert restored[0].request_size == 7
+        assert restored[0].response_size == 2
+    finally:
+        storage.close()

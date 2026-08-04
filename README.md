@@ -114,6 +114,14 @@ Después de preparar el entorno, ejecuta:
 .\.venv\Scripts\python.exe -m streaminspector.poc
 ```
 
+Hay una segunda POC que sí hace una petición HTTP real para validar todo el
+pipeline (persistencia, anotación, export/import HAR, búsqueda profunda y
+métricas) contra una web concreta:
+
+```powershell
+.\.venv\Scripts\python.exe -m streaminspector.poc_web
+```
+
 La POC realiza sin conectarse a servicios externos:
 
 1. genera un HAR de ejemplo;

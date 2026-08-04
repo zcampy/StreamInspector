@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -13,6 +14,11 @@ from PySide6.QtWidgets import (
 )
 
 from streaminspector.core.events import HttpFlowCaptured
+
+# Rol donde `AdvancedMainWindow` guarda el `flow_id` de cada fila. La barra de
+# filtros lo necesita para mapear filas visuales (post-sort) a flows y así
+# ocultar las correctas cuando la tabla está ordenada por alguna columna.
+FLOW_ID_DATA_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 class TrafficFilterBar(QWidget):
@@ -105,13 +111,22 @@ class TrafficFilterBar(QWidget):
         self.apply()
 
     def apply(self) -> None:
-        flows = self._flows()
+        flows_by_id = {flow.flow_id: flow for flow in self._flows()}
         visible = 0
-        for row, flow in enumerate(flows):
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            flow_id = str(item.data(FLOW_ID_DATA_ROLE) or "") if item is not None else ""
+            flow = flows_by_id.get(flow_id)
+            if flow is None:
+                # Fila sin flow_id (p.ej. importada de HAR sin reasignación).
+                # La dejamos visible para no perder datos sin querer.
+                visible += 1
+                continue
             matches = self._matches(flow)
             self._table.setRowHidden(row, not matches)
-            visible += int(matches)
-        self.result_label.setText(f"{visible} de {len(flows)}")
+            if matches:
+                visible += 1
+        self.result_label.setText(f"{visible} de {self._table.rowCount()}")
 
     def _matches(self, flow: HttpFlowCaptured) -> bool:
         text = self.text_filter.text().strip().casefold()

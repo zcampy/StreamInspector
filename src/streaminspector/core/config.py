@@ -10,12 +10,6 @@ APP_NAME = "StreamInspector"
 APP_AUTHOR = "StreamInspector"
 
 
-class ProxySettings(BaseModel):
-    host: str = "127.0.0.1"
-    port: int = Field(default=8080, ge=1, le=65535)
-    enabled: bool = False
-
-
 class UiSettings(BaseModel):
     theme: str = "dark"
     language: str = "es"
@@ -29,13 +23,22 @@ class StorageSettings(BaseModel):
 
 
 class AppSettings(BaseSettings):
+    """Configuración persistente de la aplicación.
+
+    NOTA: el host y el puerto del proxy NO viven aquí. Se guardan en `QSettings`
+    desde `gui/proxy_window.py` y llegan al motor de proxy mediante
+    `ProxyStartRequested(host, port)`. Mantener una sola fuente de verdad evita
+    el bug clásico de "configuro por env var y la UI la ignora" o viceversa.
+    Las variables de entorno `STREAMINSPECTOR_PROXY__HOST` y
+    `STREAMINSPECTOR_PROXY__PORT` ya no se consultan; usa el menú Proxy.
+    """
+
     model_config = SettingsConfigDict(
         env_prefix="STREAMINSPECTOR_",
         env_nested_delimiter="__",
         extra="ignore",
     )
 
-    proxy: ProxySettings = ProxySettings()
     ui: UiSettings = UiSettings()
     storage: StorageSettings = StorageSettings()
 

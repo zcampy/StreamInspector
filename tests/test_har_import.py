@@ -61,3 +61,52 @@ def test_decodes_base64_response_body() -> None:
     }
 
     assert flows_from_har(json.dumps(document))[0].response_body == b"binary data"
+
+
+def test_request_size_uses_decoded_body_length() -> None:
+    """`request_size` debe ser coherente con `len(request_body)`, no quedar a 0.
+
+    Antes del fix, el importador HAR no asignaba `request_size` y el
+    PerformanceDialog sesgaba el total de bytes para flujos importados.
+    """
+    body_text = '{"a":1,"b":2,"c":3}'
+    document = {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://api.example.com/v1",
+                        "postData": {"text": body_text},
+                    },
+                    "response": {"status": 200, "content": {"text": "ok"}},
+                }
+            ]
+        }
+    }
+
+    flow = flows_from_har(json.dumps(document))[0]
+
+    assert flow.request_size == len(flow.request_body)
+    assert flow.request_size == len(body_text.encode("utf-8"))
+
+
+def test_request_size_zero_for_get_without_postData() -> None:
+    document = {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://api.example.com/v1",
+                    },
+                    "response": {"status": 200, "content": {"text": "{}"}},
+                }
+            ]
+        }
+    }
+
+    flow = flows_from_har(json.dumps(document))[0]
+
+    assert flow.request_size == 0
+    assert flow.request_body == b""

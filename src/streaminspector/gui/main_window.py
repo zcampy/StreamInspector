@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import webbrowser
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent
@@ -9,7 +8,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -35,6 +33,7 @@ from streaminspector.core.events import (
     StoredHistoryDeleted,
     StoredHistoryDeleteRequested,
 )
+from streaminspector.gui.video_links_panel import VideoLinksPanel
 
 
 class _QtEventBridge(QObject):
@@ -69,6 +68,7 @@ class MainWindow(QMainWindow):
         self._build_central_area()
         self._build_domain_dock()
         self._build_status_bar()
+        self._build_video_links_panel()
         self._subscribe_events()
         self._restore_initial_flows(initial_flows or [])
 
@@ -100,20 +100,28 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("https://example.com")
-        self.url_edit.setClearButtonEnabled(True)
-        toolbar.addWidget(QLabel(" URL "))
-        toolbar.addWidget(self.url_edit)
-
-        open_button = QPushButton("Abrir")
-        open_button.clicked.connect(self._open_requested_url)
-        toolbar.addWidget(open_button)
-
+        # Toggle del proxy. Texto siempre muestra el ESTADO actual ("Proxy ON"
+        # cuando está encendido, "Proxy OFF" cuando está apagado) y un fondo
+        # verde cuando está activo. Esto evita la confusión de la convención
+        # acción/estado. Sustituye a la antigua URL bar + "Abrir" (que dependía
+        # de `webbrowser.open` y no hacía nada si no había navegador por
+        # defecto).
         self.proxy_button = QPushButton("Proxy OFF")
         self.proxy_button.setCheckable(True)
+        self.proxy_button.setMinimumWidth(110)
+        self.proxy_button.setToolTip(
+            "Arrancar o parar el proxy local (mitmproxy en 127.0.0.1). "
+            "Atajo: Ctrl+P"
+        )
+        self.proxy_button.setShortcut("Ctrl+P")
         self.proxy_button.toggled.connect(self._toggle_proxy)
         toolbar.addWidget(self.proxy_button)
+
+        # Indicador textual redundante para usuarios que no distinguen el color.
+        self.proxy_status_label = QLabel(" Proxy detenido")
+        self.proxy_status_label.setStyleSheet("color: #888c95;")
+        toolbar.addWidget(self.proxy_status_label)
+        toolbar.addSeparator()
 
     def _build_central_area(self) -> None:
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -165,26 +173,47 @@ class MainWindow(QMainWindow):
         status.showMessage("Preparado — activa el proxy para comenzar")
         self.setStatusBar(status)
 
+    def _build_video_links_panel(self) -> None:
+        """Dock inferior con solo los streams de vídeo/audio capturados.
+
+        Es un derivado de `self._flows`: lo único que guarda es un map
+        `URL → flow` para resolver la fila seleccionada. Se actualiza
+        automáticamente al final de `_append_flow` y `_clear_view`.
+        """
+        self.video_links_panel = VideoLinksPanel(
+            lambda: self._flows, self
+        )
+        self.video_links_dock = QDockWidget("Streams de vídeo", self)
+        self.video_links_dock.setObjectName("video_links_dock")
+        self.video_links_dock.setWidget(self.video_links_panel)
+        # Permitir que el usuario lo oculte/mueva/flote como cualquier dock.
+        self.video_links_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea
+            | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.video_links_dock)
+        # El panel empieza vacío hasta que llegue el primer flow o se
+        # restauren flows desde SQLite.
+        self.video_links_panel.refresh()
+
     def _restore_initial_flows(self, flows: list[HttpFlowCaptured]) -> None:
         for flow in flows:
             self._append_flow(flow)
         if flows:
             self.statusBar().showMessage(f"Restauradas {len(flows)} capturas guardadas")
 
-    def _open_requested_url(self) -> None:
-        url = self.url_edit.text().strip()
-        if not url:
-            self._event_bus.publish(StatusMessage(message="Introduce una URL"))
-            return
-        if "://" not in url:
-            url = f"https://{url}"
-        webbrowser.open(url)
-        self._event_bus.publish(StatusMessage(message=f"Abriendo {url}"))
-
     def _toggle_proxy(self, enabled: bool) -> None:
-        self.proxy_button.setEnabled(False)
+        # NO desactivamos el botón aquí: el estado real lo dicta `ProxyStateChanged`
+        # cuando mitmproxy termina de arrancar/parar. Si lo desactivamos y por
+        # algún motivo el evento `running=False` no llega, el botón se queda
+        # muerto y el usuario no puede volver a pulsar. El throttle lo hace
+        # `start()` en `ProxyService` (chequea `is_alive()` antes de crear hilo).
         event = ProxyStartRequested() if enabled else ProxyStopRequested()
         self._event_bus.publish(event)
+        if enabled:
+            self.statusBar().showMessage("Arrancando proxy…", 4000)
+        else:
+            self.statusBar().showMessage("Deteniendo proxy…", 4000)
 
     def _clear_view(self) -> None:
         self.history.setRowCount(0)
@@ -192,6 +221,9 @@ class MainWindow(QMainWindow):
         self._reset_domain_tree()
         for editor in self._detail_editors():
             editor.clear()
+        panel = getattr(self, "video_links_panel", None)
+        if panel is not None:
+            panel.refresh()
         self._event_bus.publish(
             StatusMessage(message="Vista limpiada; el historial guardado no se ha eliminado")
         )
@@ -227,13 +259,43 @@ class MainWindow(QMainWindow):
     def _on_status_message(self, event: StatusMessage) -> None:
         self.statusBar().showMessage(event.message, 6000)
 
-    @Slot(object)
-    def _on_proxy_state_changed(self, event: ProxyStateChanged) -> None:
+    def _render_proxy_state(self, running: bool, host: str = "", port: int = 0) -> None:
+        """Actualiza el botón y el indicador para reflejar el estado REAL del proxy.
+
+        Usado desde `_on_proxy_state_changed` y desde `_on_proxy_error`. Refleja
+        el estado sin disparar `toggled` para evitar bucles de "click → stop →
+        toggle → start".
+        """
         self.proxy_button.blockSignals(True)
-        self.proxy_button.setChecked(event.running)
-        self.proxy_button.setText("Proxy ON" if event.running else "Proxy OFF")
+        self.proxy_button.setChecked(running)
+        self.proxy_button.setText("Proxy ON" if running else "Proxy OFF")
+        # Fondo verde cuando está activo para feedback visual adicional.
+        if running:
+            self.proxy_button.setStyleSheet(
+                "QPushButton { background-color: #1f7a3a; color: #ffffff; "
+                "border: 1px solid #2a9c4a; border-radius: 4px; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #25914a; }"
+            )
+        else:
+            self.proxy_button.setStyleSheet("")
         self.proxy_button.setEnabled(True)
         self.proxy_button.blockSignals(False)
+
+        # Etiqueta redundante: si el color falla o el usuario no distingue
+        # el rojo/verde, el texto al lado lo dice sin ambigüedad.
+        if hasattr(self, "proxy_status_label"):
+            if running:
+                self.proxy_status_label.setText(
+                    f" Proxy escuchando en {host}:{port}" if host else " Proxy activo"
+                )
+                self.proxy_status_label.setStyleSheet("color: #6dd58c;")
+            else:
+                self.proxy_status_label.setText(" Proxy detenido")
+                self.proxy_status_label.setStyleSheet("color: #888c95;")
+
+    @Slot(object)
+    def _on_proxy_state_changed(self, event: ProxyStateChanged) -> None:
+        self._render_proxy_state(event.running, event.host, event.port)
         if event.running:
             self.statusBar().showMessage(f"Proxy activo en {event.host}:{event.port}")
         else:
@@ -241,11 +303,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_proxy_error(self, event: ProxyError) -> None:
-        self.proxy_button.blockSignals(True)
-        self.proxy_button.setChecked(False)
-        self.proxy_button.setText("Proxy OFF")
-        self.proxy_button.setEnabled(True)
-        self.proxy_button.blockSignals(False)
+        self._render_proxy_state(running=False)
         self.statusBar().showMessage(f"Error del proxy: {event.message}", 10000)
 
     @Slot(object)
@@ -282,6 +340,13 @@ class MainWindow(QMainWindow):
             item = QTreeWidgetItem([event.host])
             self._domains[event.host] = item
             self._domain_root.addChild(item)
+
+        # El panel inferior de streams se rebuildea entero. Es barato (pocas
+        # filas) y garantiza que un flow cargado tarde o temprano
+        # aparezca sin invalidar caches.
+        panel = getattr(self, "video_links_panel", None)
+        if panel is not None:
+            panel.refresh()
 
     def _show_selected_flow(self) -> None:
         row = self.history.currentRow()
