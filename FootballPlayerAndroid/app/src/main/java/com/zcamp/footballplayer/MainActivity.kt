@@ -1,6 +1,11 @@
 package com.zcamp.footballplayer
 
+import android.annotation.SuppressLint
 import android.os.Bundle
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,16 +34,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.media3.common.MediaItem
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.hls.HlsMediaSource
-import androidx.media3.ui.PlayerView
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,9 +51,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun FootballApp(vm: FootballViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val stream = state.selectedStream
-    if (stream != null) {
-        PlayerScreen(stream, vm.playbackHeaders(), vm::closePlayer)
+    val pageUrl = state.selectedPageUrl
+    if (pageUrl != null) {
+        MatchWebView(pageUrl, vm::closeWebView)
         return
     }
 
@@ -90,7 +89,7 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
 
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(state.matches, key = FootballMatch::id) { match ->
-                    MatchRow(match, onSelect = { vm.select(match) })
+                    MatchRow(match, onOpen = { vm.open(match) })
                 }
             }
         }
@@ -98,62 +97,73 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
 }
 
 @Composable
-private fun MatchRow(match: FootballMatch, onSelect: () -> Unit) {
-    val searching = match.state == MatchState.Searching
+private fun MatchRow(match: FootballMatch, onOpen: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable(enabled = !searching, onClick = onSelect)
+            .clickable(onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(match.localTime, style = MaterialTheme.typography.labelLarge)
-            Text(
-                when (match.state) {
-                    MatchState.Pending -> "Pendiente · pulsa para buscar"
-                    MatchState.Searching -> "Buscando…"
-                    MatchState.Available -> "Disponible"
-                    MatchState.NotDirect -> "No directo · reintentar"
-                    MatchState.Error -> "Error · reintentar"
-                },
-                style = MaterialTheme.typography.labelLarge,
-            )
+            Text("Abrir", style = MaterialTheme.typography.labelLarge)
         }
         Spacer(Modifier.height(4.dp))
         Text("${match.home} vs ${match.away}", style = MaterialTheme.typography.titleMedium)
         if (match.competition.isNotBlank()) {
             Text(match.competition, style = MaterialTheme.typography.bodyMedium)
         }
-        if (match.state == MatchState.Available) {
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = onSelect) { Text("Reproducir") }
-        } else if (!searching) {
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = onSelect) { Text("Buscar enlace") }
-        }
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onOpen) { Text("Ver partido") }
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun PlayerScreen(url: String, headers: Map<String, String>, onBack: () -> Unit) {
-    val context = LocalContext.current
-    val player = remember(url) { ExoPlayer.Builder(context).build() }
-    DisposableEffect(url, player) {
-        val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent(headers["User-Agent"] ?: "FootballPlayer")
-            .setDefaultRequestProperties(headers)
-        val source = HlsMediaSource.Factory(dataSource)
-            .createMediaSource(MediaItem.fromUri(url))
-        player.setMediaSource(source)
-        player.prepare()
-        player.playWhenReady = true
-        onDispose { player.release() }
+private fun MatchWebView(url: String, onBack: () -> Unit) {
+    val webView = remember(url) { arrayOfNulls<WebView>(1) }
+    DisposableEffect(url) {
+        onDispose {
+            webView[0]?.apply {
+                stopLoading()
+                loadUrl("about:blank")
+                clearHistory()
+                removeAllViews()
+                destroy()
+            }
+            webView[0] = null
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
-        Button(onClick = onBack, modifier = Modifier.padding(12.dp)) { Text("Volver") }
+        Row(
+            Modifier.fillMaxWidth().padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = onBack) { Text("Volver") }
+            Text("Reproductor web", style = MaterialTheme.typography.titleMedium)
+        }
         AndroidView(
-            factory = { PlayerView(it).apply { this.player = player } },
+            factory = { context ->
+                WebView(context).apply {
+                    webView[0] = this
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.loadsImagesAutomatically = true
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = true
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    webViewClient = WebViewClient()
+                    webChromeClient = WebChromeClient()
+                    loadUrl(url)
+                }
+            },
+            update = { view ->
+                if (view.url != url) view.loadUrl(url)
+            },
             modifier = Modifier.fillMaxSize(),
         )
     }
