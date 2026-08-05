@@ -2,6 +2,8 @@ package com.zcamp.footballplayer
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -68,7 +71,7 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
 
     val pageUrl = state.selectedPageUrl
     if (pageUrl != null) {
-        MatchWebView(
+        HiddenMatchResolver(
             url = pageUrl,
             onStreamResolved = vm::streamResolved,
             onBack = vm::closeWebView,
@@ -139,16 +142,18 @@ private fun MatchRow(match: FootballMatch, onOpen: () -> Unit) {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun MatchWebView(
+private fun HiddenMatchResolver(
     url: String,
     onStreamResolved: (String, Map<String, String>) -> Unit,
     onBack: () -> Unit,
 ) {
     val webView = remember(url) { arrayOfNulls<WebView>(1) }
     val resolved = remember(url) { AtomicBoolean(false) }
+    val handler = remember(url) { Handler(Looper.getMainLooper()) }
 
     DisposableEffect(url) {
         onDispose {
+            handler.removeCallbacksAndMessages(null)
             webView[0]?.apply {
                 stopLoading()
                 loadUrl("about:blank")
@@ -160,19 +165,22 @@ private fun MatchWebView(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(onClick = onBack) { Text("Volver") }
-            Text("Buscando vídeo…", style = MaterialTheme.typography.titleMedium)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+            Text("Obteniendo vídeo…", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            Text("La página se está procesando en segundo plano")
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = onBack) { Text("Cancelar") }
         }
+
         AndroidView(
             factory = { context ->
                 WebView(context).apply {
                     webView[0] = this
+                    alpha = 0.01f
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false
@@ -184,27 +192,77 @@ private fun MatchWebView(
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
 
+                    fun resolve(requestUrl: String, requestHeaders: Map<String, String>) {
+                        if (!requestUrl.contains(".m3u8", ignoreCase = true)) return
+                        if (!resolved.compareAndSet(false, true)) return
+                        val headers = requestHeaders.toMutableMap()
+                        val cookies = cookieManager.getCookie(requestUrl)
+                            ?: cookieManager.getCookie(url)
+                        if (!cookies.isNullOrBlank()) headers["Cookie"] = cookies
+                        headers.putIfAbsent("Referer", url)
+                        headers.putIfAbsent("User-Agent", settings.userAgentString)
+                        post { onStreamResolved(requestUrl, headers) }
+                    }
+
+                    fun triggerPlayback(attempt: Int = 0) {
+                        if (resolved.get() || attempt >= 30) return
+                        val script = """
+                            (function() {
+                                try {
+                                    document.querySelectorAll('video').forEach(function(v) {
+                                        v.muted = true;
+                                        v.autoplay = true;
+                                        var p = v.play();
+                                        if (p && p.catch) p.catch(function(){});
+                                    });
+                                    var selectors = [
+                                        'button[aria-label*=play i]',
+                                        '[class*=play i]',
+                                        '[id*=play i]',
+                                        '.vjs-big-play-button',
+                                        '.jw-icon-playback',
+                                        '.plyr__control--overlaid'
+                                    ];
+                                    selectors.forEach(function(selector) {
+                                        document.querySelectorAll(selector).forEach(function(el) {
+                                            try { el.click(); } catch (e) {}
+                                        });
+                                    });
+                                } catch (e) {}
+                            })();
+                        """.trimIndent()
+                        evaluateJavascript(script, null)
+                        handler.postDelayed({ triggerPlayback(attempt + 1) }, 1000L)
+                    }
+
                     webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            val target = request.url.toString()
+                            return if (target.startsWith("http://") || target.startsWith("https://")) {
+                                view.loadUrl(target)
+                                true
+                            } else {
+                                false
+                            }
+                        }
+
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
                         ): WebResourceResponse? {
-                            val requestUrl = request.url.toString()
-                            if (
-                                requestUrl.contains(".m3u8", ignoreCase = true) &&
-                                resolved.compareAndSet(false, true)
-                            ) {
-                                val headers = request.requestHeaders.toMutableMap()
-                                val cookies = cookieManager.getCookie(requestUrl)
-                                    ?: cookieManager.getCookie(url)
-                                if (!cookies.isNullOrBlank()) headers["Cookie"] = cookies
-                                if (!headers.containsKey("Referer")) headers["Referer"] = url
-                                if (!headers.containsKey("User-Agent")) {
-                                    headers["User-Agent"] = settings.userAgentString
-                                }
-                                view.post { onStreamResolved(requestUrl, headers) }
-                            }
+                            resolve(request.url.toString(), request.requestHeaders)
                             return null
+                        }
+
+                        override fun onLoadResource(view: WebView, resourceUrl: String) {
+                            resolve(resourceUrl, emptyMap())
+                        }
+
+                        override fun onPageFinished(view: WebView, finishedUrl: String) {
+                            triggerPlayback()
                         }
                     }
                     webChromeClient = WebChromeClient()
@@ -214,7 +272,7 @@ private fun MatchWebView(
             update = { view ->
                 if (view.url != url && !resolved.get()) view.loadUrl(url)
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.size(1.dp),
         )
     }
 }
