@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from streaminspector.football_events import parse_football_events
+from streaminspector.core.events import HttpFlowCaptured
+from streaminspector.football_events import (
+    captured_playlist_for_match,
+    match_id_from_stream_detail_url,
+    parse_football_events,
+)
 
 
 def _varint(value: int) -> bytes:
@@ -22,6 +27,33 @@ def _field_bytes(number: int, value: bytes) -> bytes:
 
 def _localized(text: str) -> bytes:
     return _field_varint(1, 4) + _field_bytes(2, text.encode())
+
+
+def _flow(
+    url: str,
+    *,
+    content_type: str = "application/json",
+    body: bytes = b"",
+) -> HttpFlowCaptured:
+    return HttpFlowCaptured(
+        flow_id=url,
+        method="GET",
+        scheme="https",
+        host="example.test",
+        port=443,
+        path="/",
+        url=url,
+        http_version="HTTP/2.0",
+        status_code=200,
+        reason="OK",
+        request_headers=(),
+        response_headers=(),
+        request_body=b"",
+        response_body=body,
+        content_type=content_type,
+        response_size=len(body),
+        duration_ms=1.0,
+    )
 
 
 def test_parses_live_football_event_metadata() -> None:
@@ -57,3 +89,35 @@ def test_parses_live_football_event_metadata() -> None:
     assert parsed.match_slug == "fc-tulsa-vs-sacramento-republic-fc"
     assert parsed.competition_slug == "usl-championship"
     assert parsed.season_slug == "2026"
+
+
+def test_extracts_match_id_from_stream_detail_url() -> None:
+    url = (
+        "https://api.example/api/stream/detail?streamId=761151&matchId=4460343"
+        "&sportType=1"
+    )
+
+    assert match_id_from_stream_detail_url(url) == 4460343
+    assert match_id_from_stream_detail_url("https://api.example/api/match/live") is None
+
+
+def test_correlates_playlist_after_stream_detail_request() -> None:
+    flows = [
+        _flow("https://api.example/api/stream/detail?matchId=4460343&streamId=1"),
+        _flow(
+            "https://cdn.example/live/index.m3u8",
+            content_type="application/vnd.apple.mpegurl",
+            body=b"#EXTM3U\n#EXTINF:2,\nsegment.ts\n",
+        ),
+        _flow("https://api.example/api/stream/detail?matchId=999&streamId=2"),
+        _flow(
+            "https://cdn.example/other/index.m3u8",
+            content_type="application/vnd.apple.mpegurl",
+            body=b"#EXTM3U\n",
+        ),
+    ]
+
+    playlist = captured_playlist_for_match(flows, 4460343)
+
+    assert playlist is not None
+    assert playlist.url == "https://cdn.example/live/index.m3u8"
