@@ -29,7 +29,6 @@ private val M3U8 = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-
 data class FootballMatch(
     val id: Long,
     val startsAtMs: Long,
@@ -46,6 +45,12 @@ data class FootballMatch(
 }
 
 enum class MatchState { Pending, Searching, Available, NotDirect, Error }
+
+private data class StreamDescriptor(
+    val streamId: Long,
+    val siteType: Long,
+    val digit: String,
+)
 
 class FootballBackend {
     private val client = OkHttpClient.Builder()
@@ -81,47 +86,64 @@ class FootballBackend {
 
     fun discoverDirectStream(apiBase: String, matchId: Long): String? {
         val detailUrl = "$apiBase/api/match/detail?matchId=$matchId&sportType=1&language=4&stream=true"
-        val body = get(detailUrl)
-        val text = body.decodeToString().replace("\\/", "/")
-        return M3U8.find(text)?.value
+        val detailBody = get(detailUrl)
+        extractM3u8(detailBody)?.let { return it }
+
+        val descriptors = FootballProtoParser.streamDescriptors(detailBody, matchId)
+        for (descriptor in descriptors.take(8)) {
+            val streamUrl = API_ORIGIN.toHttpUrl().newBuilder()
+                .addPathSegments("api/stream/detail")
+                .addQueryParameter("streamId", descriptor.streamId.toString())
+                .addQueryParameter("siteType", descriptor.siteType.toString())
+                .addQueryParameter("continent", "EU")
+                .addQueryParameter("country", "ES")
+                .addQueryParameter("digit", descriptor.digit)
+                .addQueryParameter("matchId", matchId.toString())
+                .addQueryParameter("sportType", "1")
+                .build()
+            val streamBody = runCatching { get(streamUrl.toString()) }.getOrNull() ?: continue
+            extractM3u8(streamBody)?.let { return it }
+        }
+        return null
     }
 
     fun playbackHeaders(): Map<String, String> = headers
+
+    private fun extractM3u8(body: ByteArray): String? {
+        val text = body.decodeToString()
+            .replace("\\/", "/")
+            .replace("\\u002F", "/", ignoreCase = true)
+            .replace("\\u003A", ":", ignoreCase = true)
+        return M3U8.find(text)?.value
+    }
 
     private fun discoverApiBases(): List<String> {
         val bases = mutableListOf<String>()
         val pageText = runCatching { get(FOOTBALL_PAGE).decodeToString() }.getOrNull()
         if (pageText != null) {
-            findApiBase(pageText, FOOTBALL_PAGE)?.let(bases::add)
-
+            findApiBase(pageText)?.let(bases::add)
             val pageUrl = FOOTBALL_PAGE.toHttpUrl()
             val scripts = SCRIPT_SRC.findAll(pageText)
                 .map { it.groupValues[1] }
                 .distinct()
                 .take(40)
                 .toList()
-
             for (src in scripts) {
                 val scriptUrl = pageUrl.resolve(src)?.toString() ?: continue
                 val scriptText = runCatching { get(scriptUrl).decodeToString() }.getOrNull() ?: continue
-                findApiBase(scriptText, scriptUrl)?.let { base ->
-                    if (base !in bases) bases += base
-                }
+                findApiBase(scriptText)?.let { base -> if (base !in bases) bases += base }
             }
         }
-
         if (API_ORIGIN !in bases) bases += API_ORIGIN
         return bases
     }
 
-    private fun findApiBase(rawText: String, sourceUrl: String): String? {
+    private fun findApiBase(rawText: String): String? {
         val text = rawText
             .replace("\\/", "/")
             .replace("\\u002F", "/", ignoreCase = true)
             .replace("\\u003A", ":", ignoreCase = true)
-
         ABSOLUTE_API_PREFIX.find(text)?.value?.let { return it.trimEnd('/') }
-
         val relative = RELATIVE_API_PREFIX.find(text)?.groupValues?.getOrNull(1) ?: return null
         return API_ORIGIN + relative.trimEnd('/')
     }
@@ -143,6 +165,46 @@ private object FootballProtoParser {
     fun parse(data: ByteArray): List<FootballMatch> {
         val root = messages(data, 10).firstOrNull() ?: return emptyList()
         return messages(root, 1).mapNotNull(::parseEvent).sortedBy { it.startsAtMs }
+    }
+
+    fun streamDescriptors(data: ByteArray, matchId: Long): List<StreamDescriptor> {
+        val integers = mutableSetOf<Long>()
+        val strings = mutableSetOf<String>()
+        collectScalars(data, integers, strings, depth = 0)
+        val streamIds = integers.filter { it in 10_000..99_999_999 && it != matchId }
+        val siteTypes = integers.filter { it in 1_000..9_999 }
+        val digits = strings.filter { value ->
+            value.length in 2..20 && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }
+        }
+        val preferredDigits = digits.sortedByDescending { it.any(Char::isLetter) }.ifEmpty { listOf("seth") }
+        val result = mutableListOf<StreamDescriptor>()
+        for (streamId in streamIds) {
+            for (siteType in siteTypes) {
+                if (streamId == siteType) continue
+                for (digit in preferredDigits.take(4)) {
+                    result += StreamDescriptor(streamId, siteType, digit)
+                    if (result.size >= 16) return result
+                }
+            }
+        }
+        return result
+    }
+
+    private fun collectScalars(
+        data: ByteArray,
+        integers: MutableSet<Long>,
+        strings: MutableSet<String>,
+        depth: Int,
+    ) {
+        if (depth > 6) return
+        val parsed = runCatching { fields(data) }.getOrNull() ?: return
+        for (field in parsed) {
+            field.integer?.let(integers::add)
+            val bytes = field.bytes ?: continue
+            val text = runCatching { bytes.toString(Charsets.UTF_8) }.getOrNull()
+            if (text != null && text.isNotBlank() && text.all { it.code in 32..126 }) strings += text
+            collectScalars(bytes, integers, strings, depth + 1)
+        }
     }
 
     private fun parseEvent(data: ByteArray): FootballMatch? {
