@@ -49,7 +49,7 @@ def find_ffmpeg() -> str | None:
 
 
 def _hls_http_compat_args() -> list[str]:
-    """Evita reutilizar conexiones cuando playlist y segmentos cambian de host."""
+    """Compatibilidad para HLS con redirecciones y extensiones engañosas."""
     return [
         "-http_persistent",
         "0",
@@ -57,6 +57,10 @@ def _hls_http_compat_args() -> list[str]:
         "0",
         "-seg_max_retry",
         "3",
+        # Algunos proveedores entregan MPEG-TS con extensión .json. Se añade
+        # solo esa extensión concreta; no se utiliza ALL.
+        "-allowed_segment_extensions",
+        "json,3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4",
     ]
 
 
