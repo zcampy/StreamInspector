@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 
 private const val FOOTBALL_PAGE = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
+private const val API_ORIGIN = "https://apis-data-defra10.tcdru136ovur.ru"
 private val ABSOLUTE_API_PREFIX = Regex(
     "https?://[^\\\"'\\s<>]+/sfver[^/\\\"'\\s<>]+",
     RegexOption.IGNORE_CASE,
@@ -55,15 +56,27 @@ class FootballBackend {
 
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36",
-        "Accept" to "*/*",
+        "Accept" to "application/json, text/plain, */*",
         "Accept-Language" to "es-ES,es;q=0.9",
-        "Referer" to FOOTBALL_PAGE,
+        "Origin" to FOOTBALL_PAGE.substringBefore("/es/"),
+        "Referer" to FOOTBALL_PAGE.substringBefore("/es/") + "/",
     )
 
     fun loadMatches(): Pair<String, List<FootballMatch>> {
-        val apiBase = discoverApiBase()
-        val body = get("$apiBase/api/match/live?sportType=1&language=4&stream=true")
-        return apiBase to FootballProtoParser.parse(body)
+        val errors = mutableListOf<String>()
+        for (apiBase in discoverApiBases()) {
+            val result = runCatching {
+                val body = get("$apiBase/api/match/live?sportType=1&language=4&stream=true")
+                FootballProtoParser.parse(body)
+            }
+            result.onSuccess { matches ->
+                if (matches.isNotEmpty()) return apiBase to matches
+                errors += "$apiBase: respuesta sin partidos"
+            }.onFailure { error ->
+                errors += "$apiBase: ${error.message ?: error::class.simpleName}"
+            }
+        }
+        error("No se pudo cargar el calendario. " + errors.take(3).joinToString(" | "))
     }
 
     fun discoverDirectStream(apiBase: String, matchId: Long): String? {
@@ -73,34 +86,32 @@ class FootballBackend {
         return M3U8.find(text)?.value
     }
 
-    fun playbackHeaders(): Map<String, String> = headers + mapOf(
-        "Origin" to FOOTBALL_PAGE.substringBefore("/es/")
-    )
+    fun playbackHeaders(): Map<String, String> = headers
 
-    private fun discoverApiBase(): String {
-        val pageBytes = get(FOOTBALL_PAGE)
-        val pageText = pageBytes.decodeToString()
-        findApiBase(pageText, FOOTBALL_PAGE)?.let { return it }
+    private fun discoverApiBases(): List<String> {
+        val bases = mutableListOf<String>()
+        val pageText = runCatching { get(FOOTBALL_PAGE).decodeToString() }.getOrNull()
+        if (pageText != null) {
+            findApiBase(pageText, FOOTBALL_PAGE)?.let(bases::add)
 
-        val pageUrl = FOOTBALL_PAGE.toHttpUrl()
-        val scripts = SCRIPT_SRC.findAll(pageText)
-            .map { it.groupValues[1] }
-            .distinct()
-            .take(40)
-            .toList()
+            val pageUrl = FOOTBALL_PAGE.toHttpUrl()
+            val scripts = SCRIPT_SRC.findAll(pageText)
+                .map { it.groupValues[1] }
+                .distinct()
+                .take(40)
+                .toList()
 
-        var downloaded = 0
-        for (src in scripts) {
-            val scriptUrl = pageUrl.resolve(src)?.toString() ?: continue
-            val scriptText = runCatching { get(scriptUrl).decodeToString() }.getOrNull() ?: continue
-            downloaded += 1
-            findApiBase(scriptText, scriptUrl)?.let { return it }
+            for (src in scripts) {
+                val scriptUrl = pageUrl.resolve(src)?.toString() ?: continue
+                val scriptText = runCatching { get(scriptUrl).decodeToString() }.getOrNull() ?: continue
+                findApiBase(scriptText, scriptUrl)?.let { base ->
+                    if (base !in bases) bases += base
+                }
+            }
         }
 
-        error(
-            "No se encontró el prefijo dinámico de la API " +
-                "(scripts detectados: ${scripts.size}, descargados: $downloaded)",
-        )
+        if (API_ORIGIN !in bases) bases += API_ORIGIN
+        return bases
     }
 
     private fun findApiBase(rawText: String, sourceUrl: String): String? {
@@ -112,8 +123,7 @@ class FootballBackend {
         ABSOLUTE_API_PREFIX.find(text)?.value?.let { return it.trimEnd('/') }
 
         val relative = RELATIVE_API_PREFIX.find(text)?.groupValues?.getOrNull(1) ?: return null
-        val source = sourceUrl.toHttpUrl()
-        return source.resolve(relative)?.toString()?.trimEnd('/')
+        return API_ORIGIN + relative.trimEnd('/')
     }
 
     private fun get(url: String): ByteArray {
