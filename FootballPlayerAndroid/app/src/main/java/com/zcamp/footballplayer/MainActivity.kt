@@ -90,7 +90,7 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
 
             else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(state.matches, key = FootballMatch::id) { match ->
-                    MatchRow(match, onPlay = { vm.play(match) })
+                    MatchRow(match, onSelect = { vm.select(match) })
                 }
             }
         }
@@ -98,23 +98,23 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
 }
 
 @Composable
-private fun MatchRow(match: FootballMatch, onPlay: () -> Unit) {
-    val available = match.state == MatchState.Available
+private fun MatchRow(match: FootballMatch, onSelect: () -> Unit) {
+    val searching = match.state == MatchState.Searching
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable(enabled = available, onClick = onPlay)
+            .clickable(enabled = !searching, onClick = onSelect)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(match.localTime, style = MaterialTheme.typography.labelLarge)
             Text(
                 when (match.state) {
-                    MatchState.Pending -> "Pendiente"
+                    MatchState.Pending -> "Pendiente · pulsa para buscar"
                     MatchState.Searching -> "Buscando…"
                     MatchState.Available -> "Disponible"
-                    MatchState.NotDirect -> "No directo"
-                    MatchState.Error -> "Error"
+                    MatchState.NotDirect -> "No directo · reintentar"
+                    MatchState.Error -> "Error · reintentar"
                 },
                 style = MaterialTheme.typography.labelLarge,
             )
@@ -124,9 +124,12 @@ private fun MatchRow(match: FootballMatch, onPlay: () -> Unit) {
         if (match.competition.isNotBlank()) {
             Text(match.competition, style = MaterialTheme.typography.bodyMedium)
         }
-        if (available) {
+        if (match.state == MatchState.Available) {
             Spacer(Modifier.height(8.dp))
-            Button(onClick = onPlay) { Text("Reproducir") }
+            Button(onClick = onSelect) { Text("Reproducir") }
+        } else if (!searching) {
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onSelect) { Text("Buscar enlace") }
         }
     }
 }
