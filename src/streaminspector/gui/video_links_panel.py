@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -91,8 +90,8 @@ class VideoLinksPanel(QWidget):
         layout.addWidget(self.table)
 
         button_layout = QHBoxLayout()
-        self.play_button = QPushButton("▶ Probar en navegador")
-        self.play_button.clicked.connect(self._open_selected_in_browser)
+        self.play_button = QPushButton("▶ Reproducir")
+        self.play_button.clicked.connect(self._validate_and_play_selected)
         self.play_button.setEnabled(False)
         button_layout.addWidget(self.play_button)
 
@@ -274,21 +273,102 @@ class VideoLinksPanel(QWidget):
             request_headers=flow.request_headers,
         ).exec()
 
-    def _open_selected_in_browser(self) -> None:
+    def _run_flow_validation(
+        self,
+        flow: HttpFlowCaptured,
+        *,
+        include_sensitive_headers: bool = False,
+    ) -> StreamValidationResult:
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        try:
+            return validate_reproducible_link(
+                flow.url,
+                flow.request_headers,
+                include_sensitive_headers=include_sensitive_headers,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _validate_and_play_selected(self) -> None:
         flow = self._selected_flow()
         if flow is None:
             QMessageBox.information(
                 self,
-                "Probar en navegador",
+                "Reproducir",
                 "Selecciona un stream primero.",
             )
             return
-        if not QDesktopServices.openUrl(QUrl(flow.url)):
+
+        executable = find_ffplay()
+        if executable is None:
             QMessageBox.warning(
                 self,
-                "No se pudo abrir el navegador",
-                f"El sistema no pudo abrir esta URL:\n{flow.url}",
+                "ffplay no está instalado",
+                "No se encontró ffplay en PATH. Instala FFmpeg para habilitar la reproducción.",
             )
+            return
+
+        playlist = self._playlist_for_flow(flow)
+        info = build_reproducible_link_info(
+            flow.url,
+            playlist,
+            flow.request_headers,
+        )
+
+        self.play_button.setEnabled(False)
+        self.play_button.setText("Validando…")
+        QApplication.processEvents()
+        try:
+            result = self._run_flow_validation(flow)
+            if (
+                not result.ok
+                and result.status_code in {401, 403}
+                and info.sensitive_headers
+            ):
+                answer = QMessageBox.question(
+                    self,
+                    "El servidor exige autenticación",
+                    "La validación respondió HTTP "
+                    f"{result.status_code}. La captura contiene "
+                    f"{', '.join(info.sensitive_headers)}.\n\n"
+                    "¿Reintentar incluyendo esas credenciales? "
+                    "No compartas la URL ni los comandos generados.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    result = self._run_flow_validation(
+                        flow,
+                        include_sensitive_headers=True,
+                    )
+
+            if not result.ok or not result.playable:
+                details = [result.message]
+                if result.status_code is not None:
+                    details.append(f"HTTP: {result.status_code}")
+                if result.media_format:
+                    details.append(f"Formato detectado: {result.media_format}")
+                QMessageBox.warning(
+                    self,
+                    "No se puede reproducir",
+                    "\n".join(details),
+                )
+                return
+
+            command = build_ffplay_command(
+                flow.url,
+                flow.request_headers,
+                include_sensitive_headers=result.used_sensitive_headers,
+                executable=executable,
+            )
+            try:
+                launch_command(command)
+            except OSError as exc:
+                QMessageBox.critical(self, "No se pudo abrir ffplay", str(exc))
+        finally:
+            self.play_button.setText("▶ Reproducir")
+            self._update_button_state()
 
     def _on_double_click(self, _index) -> None:
         flow = self._selected_flow()
@@ -303,7 +383,7 @@ class VideoLinksPanel(QWidget):
         flow = self._selected_flow()
         selected = flow is not None
         is_m3u8 = selected and self._playlist_for_flow(flow) is not None
-        self.play_button.setEnabled(selected)
+        self.play_button.setEnabled(bool(is_m3u8))
         self.reproducible_button.setEnabled(selected)
         self.copy_url_button.setEnabled(selected)
         self.copy_ffmpeg_button.setEnabled(selected)
@@ -322,9 +402,10 @@ class VideoLinksPanel(QWidget):
         if flow is None:
             return
         menu = QMenu(self)
-        menu.addAction("▶ Probar en navegador").triggered.connect(
-            self._open_selected_in_browser
-        )
+        if self._playlist_for_flow(flow) is not None:
+            menu.addAction("▶ Reproducir").triggered.connect(
+                self._validate_and_play_selected
+            )
         menu.addAction("Obtener enlace reproducible").triggered.connect(
             self._obtain_reproducible_link
         )
@@ -486,8 +567,6 @@ class ReproducibleLinkDialog(QDialog):
                 "No se encontró ffplay en PATH. Instala FFmpeg para habilitar la reproducción.",
             )
             return
-        # Usa exactamente la URL capturada que se muestra y copia al usuario.
-        # FFplay puede resolver por sí mismo playlists maestras, redirecciones y variantes.
         command = build_ffplay_command(
             self._info.url,
             self._request_headers,
