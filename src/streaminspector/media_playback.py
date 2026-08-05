@@ -7,6 +7,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+_ALLOWED_HLS_SEGMENT_EXTENSIONS = (
+    "json,3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,"
+    "mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,"
+    "cmfv,cmfa,ec3,fmp4"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PlaybackCommand:
@@ -49,7 +55,7 @@ def find_ffmpeg() -> str | None:
 
 
 def _hls_http_compat_args() -> list[str]:
-    """Compatibilidad para HLS con redirecciones y extensiones engañosas."""
+    """Adapta FFmpeg a HLS tokenizado que cambia de host y usa MIME/extensión falsa."""
     return [
         "-http_persistent",
         "0",
@@ -57,10 +63,13 @@ def _hls_http_compat_args() -> list[str]:
         "0",
         "-seg_max_retry",
         "3",
-        # Algunos proveedores entregan MPEG-TS con extensión .json. Se añade
-        # solo esa extensión concreta; no se utiliza ALL.
         "-allowed_segment_extensions",
-        "json,3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4",
+        _ALLOWED_HLS_SEGMENT_EXTENSIONS,
+        # La aplicación ya comprobó por firma que el segmento es MPEG-TS/fMP4.
+        # FFmpeg, aun permitiendo .json, rechaza el desajuste extensión/formato
+        # mientras extension_picky permanece activo.
+        "-extension_picky",
+        "0",
     ]
 
 
