@@ -32,15 +32,17 @@ def test_ffplay_uses_safe_argv_and_non_sensitive_headers() -> None:
     )
 
 
-def test_ffplay_allows_json_hls_segments_without_allowing_all_extensions() -> None:
+def test_ffplay_allows_verified_json_segments_and_relaxes_format_match() -> None:
     command = build_ffplay_command("https://cdn.example/live.m3u8")
     option_index = command.arguments.index("-allowed_segment_extensions")
     allowed = command.arguments[option_index + 1].split(",")
+    picky_index = command.arguments.index("-extension_picky")
 
     assert "json" in allowed
     assert "ts" in allowed
     assert "m4s" in allowed
     assert "ALL" not in allowed
+    assert command.arguments[picky_index + 1] == "0"
 
 
 def test_ffplay_can_include_cookie_only_with_explicit_opt_in() -> None:
