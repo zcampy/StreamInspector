@@ -1,23 +1,39 @@
-"""Descubrimiento limitado de playlists HLS expuestas directamente por la API.
-
-Este módulo no ejecuta JavaScript, no descifra cargas y no reutiliza Cookie ni
-Authorization. Solo repite una plantilla de petición ya capturada y acepta URLs
-M3U8 presentes literalmente en una respuesta accesible.
-"""
+"""Cliente HTTP de la pestaña Partidos, independiente del proxy local."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from html import unescape
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 
-from streaminspector.core.events import HttpFlowCaptured
+from streaminspector.football_events import FootballEvent, parse_football_events
 from streaminspector.media_utils import decode_response_body
 
-_SAFE_HEADERS = {"user-agent", "referer", "origin", "accept", "accept-language"}
+FOOTBALL_PAGE_URL = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
+API_ORIGIN = "https://apis-data-defra10.tcdru136ovur.ru"
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
 _M3U8_RE = re.compile(rb"https?://[^\x00-\x20\"'<>]+?\.m3u8(?:\?[^\x00-\x20\"'<>]*)?", re.I)
+_SFVER_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?(/sfver[0-9a-f]{16,})", re.I)
+_SCRIPT_RE = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+
+
+@dataclass(frozen=True, slots=True)
+class BackendContext:
+    api_base: str
+    request_headers: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleResult:
+    events: list[FootballEvent]
+    context: BackendContext | None
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,72 +44,100 @@ class DirectPlaylistResult:
     request_headers: tuple[tuple[str, str], ...] = ()
 
 
-def latest_match_detail_template(flows: list[HttpFlowCaptured]) -> HttpFlowCaptured | None:
-    for flow in reversed(flows):
-        if "/api/match/detail" in urlsplit(flow.url).path.lower():
-            return flow
-    return None
+def _headers(page_url: str = FOOTBALL_PAGE_URL) -> tuple[tuple[str, str], ...]:
+    origin = f"{urlsplit(page_url).scheme}://{urlsplit(page_url).netloc}"
+    return (
+        ("User-Agent", _USER_AGENT),
+        ("Accept", "application/json, text/plain, */*"),
+        ("Accept-Language", "es-ES,es;q=0.9"),
+        ("Origin", origin),
+        ("Referer", origin + "/"),
+    )
 
 
-def replace_match_id(url: str, match_id: int) -> str:
-    parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    replaced = False
-    output: list[tuple[str, str]] = []
-    for name, value in query:
-        if name.lower() == "matchid":
-            output.append((name, str(match_id)))
-            replaced = True
-        else:
-            output.append((name, value))
-    if not replaced:
-        output.append(("matchId", str(match_id)))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(output), parts.fragment))
-
-
-def safe_request_headers(headers: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
-    return tuple((name, value) for name, value in headers if name.lower() in _SAFE_HEADERS)
+def _get(url: str, headers: tuple[tuple[str, str], ...], timeout: float = 10.0) -> tuple[bytes, tuple[tuple[str, str], ...]]:
+    # ProxyHandler({}) evita tanto el proxy interno de StreamInspector como el proxy del sistema.
+    opener = build_opener(ProxyHandler({}))
+    request = Request(url, headers=dict(headers), method="GET")
+    with opener.open(request, timeout=timeout) as response:  # noqa: S310 - endpoints HTTPS configurados
+        return response.read(4_000_000), tuple(response.headers.items())
 
 
 def extract_direct_m3u8(body: bytes, response_headers: tuple[tuple[str, str], ...]) -> str | None:
     decoded = decode_response_body(body, response_headers)
-    candidates = [decoded]
-    # Algunas respuestas incluyen barras escapadas dentro de texto JSON/protobuf.
-    candidates.append(decoded.replace(b"\\/", b"/"))
-    for candidate in candidates:
+    for candidate in (decoded, decoded.replace(b"\\/", b"/")):
         match = _M3U8_RE.search(candidate)
         if match:
             return match.group(0).decode("utf-8", errors="strict")
     return None
 
 
+def _versioned_bases(page_url: str, headers: tuple[tuple[str, str], ...]) -> list[str]:
+    bases: list[str] = [API_ORIGIN]
+    try:
+        page_body, page_headers = _get(page_url, headers)
+        html = decode_response_body(page_body, page_headers).decode("utf-8", errors="replace")
+    except (HTTPError, URLError, TimeoutError, OSError):
+        return bases
+
+    documents = [html]
+    for src in _SCRIPT_RE.findall(html)[:12]:
+        try:
+            body, response_headers = _get(urljoin(page_url, unescape(src)), headers, timeout=6.0)
+            documents.append(decode_response_body(body, response_headers).decode("utf-8", errors="replace"))
+        except (HTTPError, URLError, TimeoutError, OSError):
+            continue
+
+    for document in documents:
+        for path in _SFVER_RE.findall(document):
+            candidate = API_ORIGIN + path.rstrip("/")
+            if candidate not in bases:
+                bases.insert(0, candidate)
+    return bases
+
+
+def load_backend_schedule(page_url: str = FOOTBALL_PAGE_URL) -> ScheduleResult:
+    headers = _headers(page_url)
+    last_error = "La API no devolvió partidos"
+    for base in _versioned_bases(page_url, headers):
+        url = base + "/api/match/live?sportType=1&language=4&stream=true"
+        try:
+            body, response_headers = _get(url, headers)
+            events = parse_football_events(body, response_headers)
+        except HTTPError as exc:
+            last_error = f"HTTP {exc.code} al cargar el calendario"
+            continue
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            last_error = str(exc)
+            continue
+        if events:
+            return ScheduleResult(events, BackendContext(base, headers), "Calendario cargado en segundo plano")
+    return ScheduleResult([], None, last_error)
+
+
 def discover_direct_playlist(
-    template: HttpFlowCaptured,
+    context: BackendContext,
     match_id: int,
     *,
     timeout: float = 8.0,
 ) -> DirectPlaylistResult:
-    headers = safe_request_headers(template.request_headers)
-    request = Request(
-        replace_match_id(template.url, match_id),
-        headers={name: value for name, value in headers},
-        method="GET",
+    url = (
+        context.api_base
+        + f"/api/match/detail?matchId={match_id}&sportType=1&language=4&stream=true"
     )
     try:
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - URL comes from captured HTTPS request
-            body = response.read(2_000_000)
-            response_headers = tuple(response.headers.items())
+        body, response_headers = _get(url, context.request_headers, timeout)
     except HTTPError as exc:
-        return DirectPlaylistResult(match_id, None, f"HTTP {exc.code}", headers)
+        return DirectPlaylistResult(match_id, None, f"HTTP {exc.code}", context.request_headers)
     except (URLError, TimeoutError, OSError) as exc:
-        return DirectPlaylistResult(match_id, None, str(exc), headers)
+        return DirectPlaylistResult(match_id, None, str(exc), context.request_headers)
 
-    url = extract_direct_m3u8(body, response_headers)
-    if url is None:
-        return DirectPlaylistResult(
-            match_id,
-            None,
-            "La API no expone un M3U8 directo; puede requerir la página o JavaScript",
-            headers,
-        )
-    return DirectPlaylistResult(match_id, url, "M3U8 directo encontrado", headers)
+    direct = extract_direct_m3u8(body, response_headers)
+    if direct:
+        return DirectPlaylistResult(match_id, direct, "M3U8 directo encontrado", context.request_headers)
+    return DirectPlaylistResult(
+        match_id,
+        None,
+        "La respuesta no contiene un M3U8 directo",
+        context.request_headers,
+    )
