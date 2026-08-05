@@ -9,6 +9,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -23,6 +24,13 @@ from PySide6.QtWidgets import (
 )
 
 from streaminspector.core.events import HttpFlowCaptured
+from streaminspector.media_playback import (
+    build_ffplay_command,
+    build_record_command,
+    find_ffmpeg,
+    find_ffplay,
+    launch_command,
+)
 from streaminspector.media_utils import (
     ReproducibleLinkInfo,
     build_ffmpeg_command,
@@ -341,8 +349,9 @@ class ReproducibleLinkDialog(QDialog):
         super().__init__(parent)
         self._info = info
         self._request_headers = request_headers or ()
+        self._validation: StreamValidationResult | None = None
         self.setWindowTitle("Enlace reproducible")
-        self.resize(820, 560)
+        self.resize(860, 620)
         layout = QVBoxLayout(self)
 
         if info.selected_variant is not None:
@@ -382,6 +391,12 @@ class ReproducibleLinkDialog(QDialog):
         command_edit.setFixedHeight(130)
         layout.addWidget(command_edit)
 
+        self.validation_label = QLabel(
+            "Valida el stream antes de reproducir o grabar. Se comprobará el formato real del segmento."
+        )
+        self.validation_label.setWordWrap(True)
+        layout.addWidget(self.validation_label)
+
         if info.warnings:
             notes = QLabel("\n".join(f"• {warning}" for warning in info.warnings))
             notes.setWordWrap(True)
@@ -391,6 +406,17 @@ class ReproducibleLinkDialog(QDialog):
         validate_button = QPushButton("Validar ahora")
         validate_button.clicked.connect(self._validate_now)
         buttons.addWidget(validate_button)
+
+        self.play_now_button = QPushButton("▶ Reproducir ahora")
+        self.play_now_button.setEnabled(False)
+        self.play_now_button.clicked.connect(self._play_now)
+        buttons.addWidget(self.play_now_button)
+
+        self.record_button = QPushButton("● Grabar stream")
+        self.record_button.setEnabled(False)
+        self.record_button.clicked.connect(self._record_stream)
+        buttons.addWidget(self.record_button)
+
         copy_url = QPushButton("Copiar URL")
         copy_url.clicked.connect(lambda: QApplication.clipboard().setText(info.url))
         buttons.addWidget(copy_url)
@@ -405,17 +431,20 @@ class ReproducibleLinkDialog(QDialog):
         buttons.addWidget(close)
         layout.addLayout(buttons)
 
-    def _validate_now(self) -> None:
+    def _run_validation(self, include_sensitive_headers: bool = False) -> StreamValidationResult:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
-            result = validate_reproducible_link(
+            return validate_reproducible_link(
                 self._info.url,
                 self._request_headers,
+                include_sensitive_headers=include_sensitive_headers,
             )
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _validate_now(self) -> None:
+        result = self._run_validation()
         if (
             not result.ok
             and result.status_code in {401, 403}
@@ -428,23 +457,85 @@ class ReproducibleLinkDialog(QDialog):
                 f"{result.status_code}. La captura contiene "
                 f"{', '.join(self._info.sensitive_headers)}.\n\n"
                 "¿Reintentar incluyendo esas credenciales? "
-                "No compartas el resultado ni el comando generado.",
+                "No compartas el resultado ni los comandos generados.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                QApplication.processEvents()
-                try:
-                    result = validate_reproducible_link(
-                        self._info.url,
-                        self._request_headers,
-                        include_sensitive_headers=True,
-                    )
-                finally:
-                    QApplication.restoreOverrideCursor()
+                result = self._run_validation(include_sensitive_headers=True)
 
+        self._validation = result
+        self.play_now_button.setEnabled(result.ok and result.playable)
+        self.record_button.setEnabled(result.ok and result.playable)
+        media_label = result.media_format or "no identificado"
+        self.validation_label.setText(
+            f"{result.message}\nFormato detectado: {media_label}."
+        )
         self._show_validation_result(result)
+
+    def _play_now(self) -> None:
+        result = self._validation
+        if result is None or not result.playable:
+            QMessageBox.warning(self, "Reproducción no disponible", "Valida primero el stream.")
+            return
+        executable = find_ffplay()
+        if executable is None:
+            QMessageBox.warning(
+                self,
+                "ffplay no está instalado",
+                "No se encontró ffplay en PATH. Instala FFmpeg para habilitar la reproducción.",
+            )
+            return
+        command = build_ffplay_command(
+            result.media_playlist_url or result.playlist_url,
+            self._request_headers,
+            include_sensitive_headers=result.used_sensitive_headers,
+            executable=executable,
+        )
+        try:
+            launch_command(command)
+        except OSError as exc:
+            QMessageBox.critical(self, "No se pudo abrir ffplay", str(exc))
+
+    def _record_stream(self) -> None:
+        result = self._validation
+        if result is None or not result.playable:
+            QMessageBox.warning(self, "Grabación no disponible", "Valida primero el stream.")
+            return
+        executable = find_ffmpeg()
+        if executable is None:
+            QMessageBox.warning(
+                self,
+                "ffmpeg no está instalado",
+                "No se encontró ffmpeg en PATH. Instala FFmpeg para habilitar la grabación.",
+            )
+            return
+        extension = "ts" if result.media_format == "mpeg-ts" else "mp4"
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar grabación",
+            f"stream.{extension}",
+            f"Vídeo (*.{extension});;Todos los archivos (*)",
+        )
+        if not output_path:
+            return
+        command = build_record_command(
+            result.media_playlist_url or result.playlist_url,
+            output_path,
+            self._request_headers,
+            include_sensitive_headers=result.used_sensitive_headers,
+            executable=executable,
+        )
+        try:
+            launch_command(command)
+        except OSError as exc:
+            QMessageBox.critical(self, "No se pudo iniciar ffmpeg", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Grabación iniciada",
+            "ffmpeg está grabando en segundo plano. Cierra su proceso para detener la captura.",
+        )
 
     def _show_validation_result(self, result: StreamValidationResult) -> None:
         details = [
@@ -456,6 +547,8 @@ class ReproducibleLinkDialog(QDialog):
             details.append(f"Variante: {result.media_playlist_url}")
         if result.segment_url:
             details.append(f"Segmento: {result.segment_url}")
+        if result.media_format:
+            details.append(f"Formato real: {result.media_format}")
         if result.status_code is not None:
             details.append(f"HTTP: {result.status_code}")
         if result.used_sensitive_headers:
