@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 
 data class FootballUiState(
@@ -23,6 +24,7 @@ class FootballViewModel : ViewModel() {
     private val _state = MutableStateFlow(FootballUiState())
     val state: StateFlow<FootballUiState> = _state.asStateFlow()
     private var apiBase: String? = null
+    private val activeLookups = mutableSetOf<Long>()
 
     init {
         refresh()
@@ -31,6 +33,7 @@ class FootballViewModel : ViewModel() {
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null, selectedStream = null) }
+            activeLookups.clear()
             runCatching { withContext(Dispatchers.IO) { backend.loadMatches() } }
                 .onSuccess { (base, matches) ->
                     apiBase = base
@@ -44,30 +47,46 @@ class FootballViewModel : ViewModel() {
     }
 
     fun discoverAll(limit: Int = 20) {
-        val base = apiBase ?: return
-        viewModelScope.launch {
-            val candidates = _state.value.matches.take(limit)
-            for (match in candidates) {
-                updateMatch(match.id) { it.copy(state = MatchState.Searching) }
-                val result = runCatching {
-                    withContext(Dispatchers.IO) { backend.discoverDirectStream(base, match.id) }
-                }
-                result.onSuccess { stream ->
-                    updateMatch(match.id) {
-                        it.copy(
-                            streamUrl = stream,
-                            state = if (stream == null) MatchState.NotDirect else MatchState.Available,
-                        )
-                    }
-                }.onFailure {
-                    updateMatch(match.id) { current -> current.copy(state = MatchState.Error) }
-                }
-            }
+        val now = System.currentTimeMillis()
+        val candidates = _state.value.matches
+            .sortedBy { abs(it.startsAtMs - now) }
+            .take(limit)
+        candidates.forEach { discover(it, autoPlay = false) }
+    }
+
+    fun select(match: FootballMatch) {
+        val stream = match.streamUrl
+        if (stream != null) {
+            _state.update { it.copy(selectedStream = stream) }
+        } else {
+            discover(match, autoPlay = true)
         }
     }
 
-    fun play(match: FootballMatch) {
-        if (match.streamUrl != null) _state.update { it.copy(selectedStream = match.streamUrl) }
+    private fun discover(match: FootballMatch, autoPlay: Boolean) {
+        val base = apiBase ?: return
+        if (!activeLookups.add(match.id)) return
+        updateMatch(match.id) { it.copy(state = MatchState.Searching) }
+
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) { backend.discoverDirectStream(base, match.id) }
+            }
+            activeLookups.remove(match.id)
+            result.onSuccess { stream ->
+                updateMatch(match.id) {
+                    it.copy(
+                        streamUrl = stream,
+                        state = if (stream == null) MatchState.NotDirect else MatchState.Available,
+                    )
+                }
+                if (autoPlay && stream != null) {
+                    _state.update { it.copy(selectedStream = stream) }
+                }
+            }.onFailure {
+                updateMatch(match.id) { current -> current.copy(state = MatchState.Error) }
+            }
+        }
     }
 
     fun closePlayer() {
