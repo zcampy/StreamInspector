@@ -1,5 +1,6 @@
 package com.zcamp.footballplayer
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
@@ -10,8 +11,22 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 
 private const val FOOTBALL_PAGE = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
-private val API_PREFIX = Regex("https://[^\\\"'\\s]+/sfver[^/\\\"'\\s]+")
-private val M3U8 = Regex("https?://[^\\s\\\"'<>]+\\.m3u8(?:\\?[^\\s\\\"'<>]*)?", RegexOption.IGNORE_CASE)
+private val ABSOLUTE_API_PREFIX = Regex(
+    "https?://[^\\\"'\\s<>]+/sfver[^/\\\"'\\s<>]+",
+    RegexOption.IGNORE_CASE,
+)
+private val RELATIVE_API_PREFIX = Regex(
+    "(?:^|[\\\"'(=:])(/sfver[^/\\\"'\\s<>]+)",
+    RegexOption.IGNORE_CASE,
+)
+private val SCRIPT_SRC = Regex(
+    "<script[^>]+src\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
+    RegexOption.IGNORE_CASE,
+)
+private val M3U8 = Regex(
+    "https?://[^\\s\\\"'<>]+\\.m3u8(?:\\?[^\\s\\\"'<>]*)?",
+    RegexOption.IGNORE_CASE,
+)
 
 
 data class FootballMatch(
@@ -46,9 +61,7 @@ class FootballBackend {
     )
 
     fun loadMatches(): Pair<String, List<FootballMatch>> {
-        val page = get(FOOTBALL_PAGE)
-        val apiBase = API_PREFIX.find(page.decodeToString())?.value
-            ?: error("No se encontró el prefijo dinámico de la API")
+        val apiBase = discoverApiBase()
         val body = get("$apiBase/api/match/live?sportType=1&language=4&stream=true")
         return apiBase to FootballProtoParser.parse(body)
     }
@@ -63,6 +76,45 @@ class FootballBackend {
     fun playbackHeaders(): Map<String, String> = headers + mapOf(
         "Origin" to FOOTBALL_PAGE.substringBefore("/es/")
     )
+
+    private fun discoverApiBase(): String {
+        val pageBytes = get(FOOTBALL_PAGE)
+        val pageText = pageBytes.decodeToString()
+        findApiBase(pageText, FOOTBALL_PAGE)?.let { return it }
+
+        val pageUrl = FOOTBALL_PAGE.toHttpUrl()
+        val scripts = SCRIPT_SRC.findAll(pageText)
+            .map { it.groupValues[1] }
+            .distinct()
+            .take(40)
+            .toList()
+
+        var downloaded = 0
+        for (src in scripts) {
+            val scriptUrl = pageUrl.resolve(src)?.toString() ?: continue
+            val scriptText = runCatching { get(scriptUrl).decodeToString() }.getOrNull() ?: continue
+            downloaded += 1
+            findApiBase(scriptText, scriptUrl)?.let { return it }
+        }
+
+        error(
+            "No se encontró el prefijo dinámico de la API " +
+                "(scripts detectados: ${scripts.size}, descargados: $downloaded)",
+        )
+    }
+
+    private fun findApiBase(rawText: String, sourceUrl: String): String? {
+        val text = rawText
+            .replace("\\/", "/")
+            .replace("\\u002F", "/", ignoreCase = true)
+            .replace("\\u003A", ":", ignoreCase = true)
+
+        ABSOLUTE_API_PREFIX.find(text)?.value?.let { return it.trimEnd('/') }
+
+        val relative = RELATIVE_API_PREFIX.find(text)?.groupValues?.getOrNull(1) ?: return null
+        val source = sourceUrl.toHttpUrl()
+        return source.resolve(relative)?.toString()?.trimEnd('/')
+    }
 
     private fun get(url: String): ByteArray {
         val builder = Request.Builder().url(url)
@@ -87,7 +139,9 @@ private object FootballProtoParser {
         val id = firstInt(data, 1)
         val starts = firstInt(data, 3)
         val competition = messages(data, 10).firstOrNull()?.let(::localizedText).orEmpty()
-        val title = messages(data, 30).firstNotNullOfOrNull { utf8(it, 2).takeIf(String::isNotBlank) }.orEmpty()
+        val title = messages(data, 30).firstNotNullOfOrNull {
+            utf8(it, 2).takeIf(String::isNotBlank)
+        }.orEmpty()
         if (id == 0L || starts == 0L || title.isBlank()) return null
         val parts = title.split(" vs ", limit = 2)
         return FootballMatch(
@@ -100,7 +154,9 @@ private object FootballProtoParser {
     }
 
     private fun localizedText(data: ByteArray): String =
-        messages(data, 3).firstNotNullOfOrNull { utf8(it, 2).takeIf(String::isNotBlank) }.orEmpty()
+        messages(data, 3).firstNotNullOfOrNull {
+            utf8(it, 2).takeIf(String::isNotBlank)
+        }.orEmpty()
 
     private fun utf8(data: ByteArray, number: Int): String =
         messages(data, number).firstNotNullOfOrNull {
@@ -113,7 +169,12 @@ private object FootballProtoParser {
     private fun messages(data: ByteArray, number: Int): List<ByteArray> =
         fields(data).filter { it.number == number && it.wire == 2 }.mapNotNull { it.bytes }
 
-    private data class Field(val number: Int, val wire: Int, val integer: Long? = null, val bytes: ByteArray? = null)
+    private data class Field(
+        val number: Int,
+        val wire: Int,
+        val integer: Long? = null,
+        val bytes: ByteArray? = null,
+    )
 
     private fun fields(data: ByteArray): List<Field> {
         val result = mutableListOf<Field>()
