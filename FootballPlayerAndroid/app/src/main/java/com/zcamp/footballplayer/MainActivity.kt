@@ -3,6 +3,7 @@ package com.zcamp.footballplayer
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -53,6 +54,38 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { MaterialTheme { FootballApp() } }
+    }
+}
+
+private class HlsBridge(
+    private val webView: WebView,
+    private val pageUrl: String,
+    private val resolved: AtomicBoolean,
+    private val onResolved: (String, Map<String, String>) -> Unit,
+) {
+    @JavascriptInterface
+    fun report(candidate: String?) {
+        val streamUrl = candidate?.trim().orEmpty()
+        if (!streamUrl.startsWith("http", ignoreCase = true)) return
+        if (!looksLikeHls(streamUrl)) return
+        resolve(streamUrl, emptyMap())
+    }
+
+    fun resolve(streamUrl: String, requestHeaders: Map<String, String>) {
+        if (!resolved.compareAndSet(false, true)) return
+        val headers = requestHeaders.toMutableMap()
+        val cookieManager = CookieManager.getInstance()
+        val cookies = cookieManager.getCookie(streamUrl) ?: cookieManager.getCookie(pageUrl)
+        if (!cookies.isNullOrBlank()) headers["Cookie"] = cookies
+        headers.putIfAbsent("Referer", pageUrl)
+        headers.putIfAbsent("User-Agent", webView.settings.userAgentString)
+        webView.post { onResolved(streamUrl, headers) }
+    }
+
+    private fun looksLikeHls(value: String): Boolean {
+        val lowered = value.lowercase()
+        return ".m3u8" in lowered || "application/vnd.apple.mpegurl" in lowered ||
+            "application/x-mpegurl" in lowered
     }
 }
 
@@ -137,7 +170,70 @@ private fun MatchRow(match: FootballMatch, onOpen: () -> Unit) {
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
+private const val HLS_HOOK = """
+(function () {
+  if (window.__footballHlsHookInstalled) return;
+  window.__footballHlsHookInstalled = true;
+
+  const report = (value) => {
+    try {
+      const url = typeof value === 'string' ? value : (value && value.url) || '';
+      if (/^https?:/i.test(url) && (/\.m3u8(?:$|[?#])/i.test(url) || /mpegurl/i.test(url))) {
+        AndroidHls.report(url);
+      }
+    } catch (_) {}
+  };
+
+  const originalFetch = window.fetch;
+  if (originalFetch) {
+    window.fetch = function(input, init) {
+      report(input);
+      return originalFetch.apply(this, arguments).then((response) => {
+        report(response && response.url);
+        try {
+          const type = response && response.headers && response.headers.get('content-type');
+          if (type && /mpegurl/i.test(type)) report(response.url);
+        } catch (_) {}
+        return response;
+      });
+    };
+  }
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, requestUrl) {
+    report(requestUrl);
+    this.addEventListener('load', function() {
+      report(this.responseURL);
+      try {
+        const type = this.getResponseHeader('content-type');
+        if (type && /mpegurl/i.test(type)) report(this.responseURL);
+      } catch (_) {}
+    });
+    return originalOpen.apply(this, arguments);
+  };
+
+  const scan = () => {
+    try {
+      performance.getEntriesByType('resource').forEach((entry) => report(entry.name));
+      document.querySelectorAll('video, source').forEach((element) => {
+        report(element.currentSrc);
+        report(element.src);
+      });
+    } catch (_) {}
+  };
+
+  new MutationObserver(scan).observe(document.documentElement || document, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src']
+  });
+  setInterval(scan, 750);
+  scan();
+})();
+"""
+
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
 private fun MatchWebView(
     url: String,
@@ -151,6 +247,7 @@ private fun MatchWebView(
         onDispose {
             webView[0]?.apply {
                 stopLoading()
+                removeJavascriptInterface("AndroidHls")
                 loadUrl("about:blank")
                 clearHistory()
                 removeAllViews()
@@ -179,30 +276,47 @@ private fun MatchWebView(
                     settings.loadsImagesAutomatically = true
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = true
+                    settings.javaScriptCanOpenWindowsAutomatically = false
+                    settings.setSupportMultipleWindows(false)
 
                     val cookieManager = CookieManager.getInstance()
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)
+                    val bridge = HlsBridge(this, url, resolved, onStreamResolved)
+                    addJavascriptInterface(bridge, "AndroidHls")
 
                     webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            val target = request.url.toString()
+                            if (target.startsWith("http", ignoreCase = true)) {
+                                view.loadUrl(target)
+                                return true
+                            }
+                            return false
+                        }
+
+                        override fun onPageFinished(view: WebView, pageUrl: String) {
+                            super.onPageFinished(view, pageUrl)
+                            if (!resolved.get()) view.evaluateJavascript(HLS_HOOK, null)
+                        }
+
+                        override fun onLoadResource(view: WebView, resourceUrl: String) {
+                            super.onLoadResource(view, resourceUrl)
+                            if (resourceUrl.contains(".m3u8", ignoreCase = true)) {
+                                bridge.resolve(resourceUrl, emptyMap())
+                            }
+                        }
+
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
                         ): WebResourceResponse? {
                             val requestUrl = request.url.toString()
-                            if (
-                                requestUrl.contains(".m3u8", ignoreCase = true) &&
-                                resolved.compareAndSet(false, true)
-                            ) {
-                                val headers = request.requestHeaders.toMutableMap()
-                                val cookies = cookieManager.getCookie(requestUrl)
-                                    ?: cookieManager.getCookie(url)
-                                if (!cookies.isNullOrBlank()) headers["Cookie"] = cookies
-                                if (!headers.containsKey("Referer")) headers["Referer"] = url
-                                if (!headers.containsKey("User-Agent")) {
-                                    headers["User-Agent"] = settings.userAgentString
-                                }
-                                view.post { onStreamResolved(requestUrl, headers) }
+                            if (requestUrl.contains(".m3u8", ignoreCase = true)) {
+                                bridge.resolve(requestUrl, request.requestHeaders)
                             }
                             return null
                         }
