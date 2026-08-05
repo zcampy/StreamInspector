@@ -32,10 +32,6 @@ from streaminspector.media_utils import (
     is_video_url,
     parse_m3u8,
 )
-from streaminspector.stream_validation import (
-    StreamValidationResult,
-    validate_reproducible_link,
-)
 
 
 class VideoLinksPanel(QWidget):
@@ -260,11 +256,7 @@ class VideoLinksPanel(QWidget):
             flow.request_headers,
         )
         QApplication.clipboard().setText(info.url)
-        ReproducibleLinkDialog(
-            info,
-            self,
-            request_headers=flow.request_headers,
-        ).exec()
+        ReproducibleLinkDialog(info, self).exec()
 
     def _open_selected_in_browser(self) -> None:
         flow = self._selected_flow()
@@ -332,17 +324,11 @@ class VideoLinksPanel(QWidget):
 
 
 class ReproducibleLinkDialog(QDialog):
-    def __init__(
-        self,
-        info: ReproducibleLinkInfo,
-        parent: QWidget | None = None,
-        request_headers: tuple[tuple[str, str], ...] | None = None,
-    ) -> None:
+    def __init__(self, info: ReproducibleLinkInfo, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._info = info
-        self._request_headers = request_headers or ()
         self.setWindowTitle("Enlace reproducible")
-        self.resize(820, 560)
+        self.resize(820, 520)
         layout = QVBoxLayout(self)
 
         if info.selected_variant is not None:
@@ -388,9 +374,6 @@ class ReproducibleLinkDialog(QDialog):
             layout.addWidget(notes)
 
         buttons = QHBoxLayout()
-        validate_button = QPushButton("Validar ahora")
-        validate_button.clicked.connect(self._validate_now)
-        buttons.addWidget(validate_button)
         copy_url = QPushButton("Copiar URL")
         copy_url.clicked.connect(lambda: QApplication.clipboard().setText(info.url))
         buttons.addWidget(copy_url)
@@ -404,64 +387,3 @@ class ReproducibleLinkDialog(QDialog):
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
         layout.addLayout(buttons)
-
-    def _validate_now(self) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            result = validate_reproducible_link(
-                self._info.url,
-                self._request_headers,
-            )
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        if (
-            not result.ok
-            and result.status_code in {401, 403}
-            and self._info.sensitive_headers
-        ):
-            answer = QMessageBox.question(
-                self,
-                "El servidor exige autenticación",
-                "La validación respondió HTTP "
-                f"{result.status_code}. La captura contiene "
-                f"{', '.join(self._info.sensitive_headers)}.\n\n"
-                "¿Reintentar incluyendo esas credenciales? "
-                "No compartas el resultado ni el comando generado.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                QApplication.processEvents()
-                try:
-                    result = validate_reproducible_link(
-                        self._info.url,
-                        self._request_headers,
-                        include_sensitive_headers=True,
-                    )
-                finally:
-                    QApplication.restoreOverrideCursor()
-
-        self._show_validation_result(result)
-
-    def _show_validation_result(self, result: StreamValidationResult) -> None:
-        details = [
-            result.message,
-            f"Etapa: {result.stage}",
-            f"Playlist: {result.playlist_url}",
-        ]
-        if result.media_playlist_url:
-            details.append(f"Variante: {result.media_playlist_url}")
-        if result.segment_url:
-            details.append(f"Segmento: {result.segment_url}")
-        if result.status_code is not None:
-            details.append(f"HTTP: {result.status_code}")
-        if result.used_sensitive_headers:
-            details.append("Se utilizaron Cookie/Authorization en esta comprobación.")
-        text = "\n".join(details)
-        if result.ok:
-            QMessageBox.information(self, "Enlace reproducible válido", text)
-        else:
-            QMessageBox.warning(self, "El enlace no ha superado la validación", text)
