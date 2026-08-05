@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -25,6 +26,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -42,14 +44,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            MaterialTheme {
-                FootballApp()
-            }
-        }
+        setContent { MaterialTheme { FootballApp() } }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FootballApp(vm: FootballViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -89,9 +88,7 @@ private fun FootballApp(vm: FootballViewModel = viewModel()) {
                 Button(onClick = vm::refresh) { Text("Reintentar") }
             }
 
-            else -> LazyColumn(
-                Modifier.fillMaxSize().padding(padding),
-            ) {
+            else -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
                 items(state.matches, key = FootballMatch::id) { match ->
                     MatchRow(match, onPlay = { vm.play(match) })
                 }
@@ -137,8 +134,8 @@ private fun MatchRow(match: FootballMatch, onPlay: () -> Unit) {
 @Composable
 private fun PlayerScreen(url: String, headers: Map<String, String>, onBack: () -> Unit) {
     val context = LocalContext.current
-    val player = ExoPlayer.Builder(context).build()
-    DisposableEffect(url) {
+    val player = remember(url) { ExoPlayer.Builder(context).build() }
+    DisposableEffect(url, player) {
         val dataSource = DefaultHttpDataSource.Factory()
             .setUserAgent(headers["User-Agent"] ?: "FootballPlayer")
             .setDefaultRequestProperties(headers)
