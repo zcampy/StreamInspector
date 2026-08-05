@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -49,6 +48,18 @@ def find_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _hls_http_compat_args() -> list[str]:
+    """Evita reutilizar conexiones cuando playlist y segmentos cambian de host."""
+    return [
+        "-http_persistent",
+        "0",
+        "-http_multiple",
+        "0",
+        "-seg_max_retry",
+        "3",
+    ]
+
+
 def build_ffplay_command(
     url: str,
     request_headers: tuple[tuple[str, str], ...] | None = None,
@@ -65,7 +76,8 @@ def build_ffplay_command(
         "-loglevel",
         "info",
         "-window_title",
-        "StreamInspector — reproducción HLS",
+        "StreamInspector - reproduccion HLS",
+        *_hls_http_compat_args(),
     ]
     if user_agent:
         args.extend(["-user_agent", user_agent])
@@ -87,7 +99,13 @@ def build_record_command(
         request_headers,
         include_sensitive_headers=include_sensitive_headers,
     )
-    args: list[str] = ["-hide_banner", "-loglevel", "info", "-y"]
+    args: list[str] = [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        *_hls_http_compat_args(),
+    ]
     if user_agent:
         args.extend(["-user_agent", user_agent])
     if headers:
@@ -97,21 +115,20 @@ def build_record_command(
 
 
 def launch_command(command: PlaybackCommand) -> subprocess.Popen[bytes]:
-    """Lanza sin shell y conserva visible la salida de diagnóstico.
-
-    En Windows se abre una consola separada. Antes se redirigían stdout y
-    stderr a DEVNULL, de modo que ffplay podía cerrarse inmediatamente sin
-    mostrar el motivo.
-    """
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-
+    """Lanza sin shell para evitar interpretar tokens o caracteres de la URL."""
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if Path(command.executable).name.lower().startswith("ffplay"):
+        creationflags |= getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        stdout = None
+        stderr = None
+    else:
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
     return subprocess.Popen(  # noqa: S603 - argv controlado, sin shell
         command.argv,
         stdin=subprocess.DEVNULL,
-        stdout=None,
-        stderr=None,
+        stdout=stdout,
+        stderr=stderr,
         shell=False,
         creationflags=creationflags,
     )
