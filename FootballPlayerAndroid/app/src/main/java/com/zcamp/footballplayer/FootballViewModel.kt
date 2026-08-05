@@ -16,6 +16,8 @@ data class FootballUiState(
     val matches: List<FootballMatch> = emptyList(),
     val error: String? = null,
     val selectedPageUrl: String? = null,
+    val selectedStreamUrl: String? = null,
+    val selectedStreamHeaders: Map<String, String> = emptyMap(),
 )
 
 class FootballViewModel : ViewModel() {
@@ -29,7 +31,15 @@ class FootballViewModel : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null, selectedPageUrl = null) }
+            _state.update {
+                it.copy(
+                    loading = true,
+                    error = null,
+                    selectedPageUrl = null,
+                    selectedStreamUrl = null,
+                    selectedStreamHeaders = emptyMap(),
+                )
+            }
             runCatching { withContext(Dispatchers.IO) { backend.loadMatches() } }
                 .onSuccess { matches ->
                     _state.value = FootballUiState(matches = matches)
@@ -43,7 +53,33 @@ class FootballViewModel : ViewModel() {
     }
 
     fun open(match: FootballMatch) {
-        _state.update { it.copy(selectedPageUrl = match.pageUrl) }
+        _state.update {
+            it.copy(
+                selectedPageUrl = match.pageUrl,
+                selectedStreamUrl = null,
+                selectedStreamHeaders = emptyMap(),
+            )
+        }
+    }
+
+    fun streamResolved(url: String, headers: Map<String, String>) {
+        _state.update {
+            it.copy(
+                selectedPageUrl = null,
+                selectedStreamUrl = url,
+                selectedStreamHeaders = headers,
+            )
+        }
+    }
+
+    fun closePlayer() {
+        _state.update {
+            it.copy(
+                selectedPageUrl = null,
+                selectedStreamUrl = null,
+                selectedStreamHeaders = emptyMap(),
+            )
+        }
     }
 
     fun closeWebView() {
