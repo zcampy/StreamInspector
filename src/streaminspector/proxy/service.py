@@ -29,19 +29,7 @@ class _ProxyEndpoint:
 
 
 class ProxyService:
-    """Run mitmproxy in its own asyncio loop and expose lifecycle through events.
-
-    El host y el puerto llegan por evento (`ProxyStartRequested`) o se aplican
-    vía `start(host, port)`. La UI los persiste en `QSettings`; este servicio
-    no consulta ni pydantic ni QSettings: una sola fuente de verdad arriba,
-    una sola conexión aquí.
-
-    Comparte un `CapturePolicy` con la UI: cuando la UI cambia el modo
-    (ALL/WHITELIST) o edita la whitelist, el filtro del addon se actualiza
-    "en vivo" porque la policy es el mismo objeto mutable. Esto permite
-    que el filtrado ocurra a nivel de addon (no en storage) y los datos
-    sensibles nunca lleguen al EventBus.
-    """
+    """Run mitmproxy in its own asyncio loop and expose lifecycle through events."""
 
     def __init__(self, event_bus: EventBus, policy: CapturePolicy) -> None:
         self._event_bus = event_bus
@@ -83,14 +71,21 @@ class ProxyService:
         with self._lock:
             loop = self._loop
             master = self._master
-        if loop is not None and master is not None and loop.is_running():
+        if loop is None or master is None or not loop.is_running() or loop.is_closed():
+            return
+        try:
             loop.call_soon_threadsafe(master.shutdown)
+        except RuntimeError:
+            LOGGER.debug("Proxy event loop was already closed during shutdown")
 
     def close(self) -> None:
         self.stop()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=5)
+        with self._lock:
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=10)
+            if thread.is_alive():
+                LOGGER.warning("Proxy thread did not stop within 10 seconds")
 
     def _on_start_requested(self, event: ProxyStartRequested) -> None:
         self.start(event.host, event.port)
@@ -110,8 +105,11 @@ class ProxyService:
         except Exception as exc:
             LOGGER.exception("Proxy engine failed")
             self._event_bus.publish(ProxyError(message=str(exc)))
-            self._event_bus.publish(StatusMessage(message=f"Error del proxy: {exc}", level="error"))
+            self._event_bus.publish(
+                StatusMessage(message=f"Error del proxy: {exc}", level="error")
+            )
         finally:
+            self._drain_loop(loop)
             with self._lock:
                 self._master = None
                 self._loop = None
@@ -123,7 +121,23 @@ class ProxyService:
                     port=port,
                 )
             )
+            asyncio.set_event_loop(None)
             loop.close()
+
+    @staticmethod
+    def _drain_loop(loop: asyncio.AbstractEventLoop) -> None:
+        """Cancel and await remaining mitmproxy tasks before closing the loop."""
+        if loop.is_closed():
+            return
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        shutdown_executor = getattr(loop, "shutdown_default_executor", None)
+        if shutdown_executor is not None:
+            loop.run_until_complete(shutdown_executor())
 
     async def _run_proxy(self) -> None:
         with self._lock:
@@ -145,7 +159,5 @@ class ProxyService:
                 port=port,
             )
         )
-        self._event_bus.publish(
-            StatusMessage(message=f"Proxy escuchando en {host}:{port}")
-        )
+        self._event_bus.publish(StatusMessage(message=f"Proxy escuchando en {host}:{port}"))
         await master.run()
