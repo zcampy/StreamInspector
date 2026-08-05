@@ -38,6 +38,8 @@ class StreamValidationResult:
     segment_url: str | None = None
     status_code: int | None = None
     used_sensitive_headers: bool = False
+    media_format: str | None = None
+    playable: bool = False
 
 
 Fetcher = Callable[[str, Mapping[str, str], int, str | None], HttpFetchResult]
@@ -79,6 +81,33 @@ def _decode_content(body: bytes, headers: Mapping[str, str]) -> bytes:
     except (OSError, ValueError, zlib.error):
         return body
     return body
+
+
+def detect_media_format(body: bytes) -> str:
+    """Reconoce formatos multimedia por firma, sin confiar en extensión o MIME."""
+    if not body:
+        return "empty"
+
+    # MPEG-TS usa paquetes de 188 bytes cuyo primer byte es siempre 0x47.
+    if body[0] == 0x47:
+        if len(body) < 189 or body[188] == 0x47:
+            return "mpeg-ts"
+
+    # ISO Base Media File Format: MP4/fMP4/CMAF.
+    if len(body) >= 8 and body[4:8] in {b"ftyp", b"styp", b"moof", b"moov"}:
+        return "fmp4"
+    for marker in (b"ftyp", b"styp", b"moof", b"moov"):
+        if marker in body[:64]:
+            return "fmp4"
+
+    stripped = body.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return "json"
+    if stripped.lower().startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+        return "html"
+    if stripped.startswith(b"#EXTM3U"):
+        return "hls-playlist"
+    return "unknown-binary"
 
 
 def _fetch_http(
@@ -135,7 +164,7 @@ def validate_reproducible_link(
     include_sensitive_headers: bool = False,
     fetcher: Fetcher = _fetch_http,
 ) -> StreamValidationResult:
-    """Comprueba playlist, mejor variante y un segmento sin descargar el vídeo."""
+    """Comprueba playlist, mejor variante y formato real de un segmento."""
     if not _validate_http_url(playlist_url):
         return StreamValidationResult(
             ok=False,
@@ -236,7 +265,6 @@ def validate_reproducible_link(
             used_sensitive_headers=include_sensitive_headers,
         )
 
-    # En directos se valida el segmento más reciente; el primero puede haber caducado.
     segment_url = playlist.segments[-1].url
     try:
         segment_result = fetcher(
@@ -268,7 +296,9 @@ def validate_reproducible_link(
             used_sensitive_headers=include_sensitive_headers,
         )
 
-    if not segment_result.body:
+    decoded_segment = _decode_content(segment_result.body, segment_result.headers)
+    media_format = detect_media_format(decoded_segment)
+    if media_format == "empty":
         return StreamValidationResult(
             ok=False,
             stage="segment",
@@ -278,15 +308,41 @@ def validate_reproducible_link(
             segment_url=segment_result.final_url,
             status_code=segment_result.status,
             used_sensitive_headers=include_sensitive_headers,
+            media_format=media_format,
         )
 
+    playable = media_format in {"mpeg-ts", "fmp4"}
+    if not playable:
+        labels = {
+            "json": "JSON real",
+            "html": "HTML, probablemente una página de error",
+            "hls-playlist": "otra playlist HLS",
+            "unknown-binary": "binario desconocido",
+        }
+        label = labels.get(media_format, media_format)
+        return StreamValidationResult(
+            ok=False,
+            stage="format",
+            message=f"El segmento es accesible, pero su formato es {label}.",
+            playlist_url=root_result.final_url,
+            media_playlist_url=media_url,
+            segment_url=segment_result.final_url,
+            status_code=segment_result.status,
+            used_sensitive_headers=include_sensitive_headers,
+            media_format=media_format,
+            playable=False,
+        )
+
+    display_format = "MPEG-TS" if media_format == "mpeg-ts" else "fMP4/CMAF"
     return StreamValidationResult(
         ok=True,
         stage="complete",
-        message="Playlist, variante y segmento accesibles.",
+        message=f"Playlist válida y segmento reproducible detectado como {display_format}.",
         playlist_url=root_result.final_url,
         media_playlist_url=media_url,
         segment_url=segment_result.final_url,
         status_code=segment_result.status,
         used_sensitive_headers=include_sensitive_headers,
+        media_format=media_format,
+        playable=True,
     )
