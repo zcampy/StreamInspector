@@ -1,11 +1,13 @@
-"""Extracción mínima de eventos de fútbol desde respuestas protobuf capturadas."""
+"""Extracción y correlación de eventos de fútbol capturados."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
-from streaminspector.media_utils import decode_response_body
+from streaminspector.core.events import HttpFlowCaptured
+from streaminspector.media_utils import decode_response_body, is_m3u8_response
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,3 +176,48 @@ def is_football_events_url(url: str) -> bool:
         and "sporttype=1" in lowered
         and "stream=true" in lowered
     )
+
+
+def match_id_from_stream_detail_url(url: str) -> int | None:
+    """Obtiene el partido asociado a `/api/stream/detail`."""
+    parsed = urlparse(url)
+    if "/api/stream/detail" not in parsed.path.lower():
+        return None
+    values = parse_qs(parsed.query).get("matchId") or parse_qs(parsed.query).get("matchid")
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def captured_playlist_for_match(
+    flows: list[HttpFlowCaptured],
+    match_id: int,
+) -> HttpFlowCaptured | None:
+    """Relaciona un partido con la playlist HLS capturada tras pedir su stream.
+
+    El navegador solicita `/api/stream/detail?...matchId=...` y, a continuación,
+    genera la playlist HLS. Se toma la última playlist capturada entre esa petición
+    y la siguiente petición de detalle de otro partido.
+    """
+    candidate: HttpFlowCaptured | None = None
+    active = False
+    for flow in flows:
+        detail_match_id = match_id_from_stream_detail_url(flow.url)
+        if detail_match_id is not None:
+            if active and detail_match_id != match_id:
+                break
+            active = detail_match_id == match_id
+            candidate = None
+            continue
+        if not active:
+            continue
+        if is_m3u8_response(
+            flow.content_type,
+            flow.response_body,
+            flow.response_headers,
+        ):
+            candidate = flow
+    return candidate
