@@ -486,8 +486,10 @@ class ReproducibleLinkDialog(QDialog):
                 "No se encontró ffplay en PATH. Instala FFmpeg para habilitar la reproducción.",
             )
             return
+        # Usa exactamente la URL capturada que se muestra y copia al usuario.
+        # FFplay puede resolver por sí mismo playlists maestras, redirecciones y variantes.
         command = build_ffplay_command(
-            result.media_playlist_url or result.playlist_url,
+            self._info.url,
             self._request_headers,
             include_sensitive_headers=result.used_sensitive_headers,
             executable=executable,
@@ -520,7 +522,7 @@ class ReproducibleLinkDialog(QDialog):
         if not output_path:
             return
         command = build_record_command(
-            result.media_playlist_url or result.playlist_url,
+            self._info.url,
             output_path,
             self._request_headers,
             include_sensitive_headers=result.used_sensitive_headers,
