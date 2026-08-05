@@ -47,7 +47,5 @@ def test_record_command_copies_stream_without_reencoding() -> None:
         "capture.ts",
         executable="ffmpeg",
     )
-    assert command.arguments[-4:] == ("-c", "copy", "capture.ts")[-4:]
-    assert "-c" in command.arguments
-    assert "copy" in command.arguments
+    assert command.arguments[-3:] == ("-c", "copy", "capture.ts")
     assert command.arguments[-1] == "capture.ts"
