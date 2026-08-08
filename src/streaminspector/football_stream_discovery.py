@@ -17,7 +17,7 @@ from streaminspector.telegram_source_resolver import (
 )
 
 # Se mantiene solo como respaldo si Telegram no se puede consultar.
-FOOTBALL_PAGE_URL = "https://jack37eo.mpcourageny9zzipper.my/es/football.html"
+FOOTBALL_PAGE_URL = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
 API_ORIGIN = "https://apis-data-defra10.tcdru136ovur.ru"
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
