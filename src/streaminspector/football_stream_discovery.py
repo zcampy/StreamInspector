@@ -11,7 +11,12 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from streaminspector.football_events import FootballEvent, parse_football_events
 from streaminspector.media_utils import decode_response_body
+from streaminspector.telegram_source_resolver import (
+    football_page_from_site,
+    resolve_latest_public_site,
+)
 
+# Se mantiene solo como respaldo si Telegram no se puede consultar.
 FOOTBALL_PAGE_URL = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
 API_ORIGIN = "https://apis-data-defra10.tcdru136ovur.ru"
 _USER_AGENT = (
@@ -96,10 +101,21 @@ def _versioned_bases(page_url: str, headers: tuple[tuple[str, str], ...]) -> lis
     return bases
 
 
-def load_backend_schedule(page_url: str = FOOTBALL_PAGE_URL) -> ScheduleResult:
-    headers = _headers(page_url)
+def _resolve_page_url(page_url: str | None) -> tuple[str, str]:
+    if page_url:
+        return page_url, "Fuente indicada manualmente"
+
+    resolution = resolve_latest_public_site()
+    if resolution.url:
+        return football_page_from_site(resolution.url), resolution.message
+    return FOOTBALL_PAGE_URL, f"{resolution.message}; usando la fuente de respaldo"
+
+
+def load_backend_schedule(page_url: str | None = None) -> ScheduleResult:
+    resolved_page_url, source_message = _resolve_page_url(page_url)
+    headers = _headers(resolved_page_url)
     last_error = "La API no devolvió partidos"
-    for base in _versioned_bases(page_url, headers):
+    for base in _versioned_bases(resolved_page_url, headers):
         url = base + "/api/match/live?sportType=1&language=4&stream=true"
         try:
             body, response_headers = _get(url, headers)
@@ -111,8 +127,12 @@ def load_backend_schedule(page_url: str = FOOTBALL_PAGE_URL) -> ScheduleResult:
             last_error = str(exc)
             continue
         if events:
-            return ScheduleResult(events, BackendContext(base, headers), "Calendario cargado en segundo plano")
-    return ScheduleResult([], None, last_error)
+            return ScheduleResult(
+                events,
+                BackendContext(base, headers),
+                f"{source_message}. Calendario cargado en segundo plano",
+            )
+    return ScheduleResult([], None, f"{source_message}. {last_error}")
 
 
 def discover_direct_playlist(
