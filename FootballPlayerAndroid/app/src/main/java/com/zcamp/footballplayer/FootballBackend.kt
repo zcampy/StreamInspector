@@ -10,8 +10,8 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 
-private const val FOOTBALL_PAGE = "https://jack37eo.mpcourageny9i9zzipper.my/es/football.html"
-private const val FOOTBALL_ORIGIN = "https://jack37eo.mpcourageny9i9zzipper.my"
+private const val TELEGRAM_PUBLIC_FEED = "https://t.me/s/juegoloco77_k"
+private const val FALLBACK_SITE_ORIGIN = "https://www.fctv33hd.ink"
 private const val API_ORIGIN = "https://apis-data-defra10.tcdru136ovur.ru"
 private val ABSOLUTE_API_PREFIX = Regex(
     "https?://[^\\\"'\\s<>]+/sfver[^/\\\"'\\s<>]+",
@@ -25,6 +25,8 @@ private val SCRIPT_SRC = Regex(
     "<script[^>]+src\\s*=\\s*[\\\"']([^\\\"']+)[\\\"']",
     RegexOption.IGNORE_CASE,
 )
+private val HREF = Regex("href\\s*=\\s*[\\\"'](https?://[^\\\"']+)[\\\"']", RegexOption.IGNORE_CASE)
+private val TEXT_URL = Regex("https?://[^\\s<\\\"']+", RegexOption.IGNORE_CASE)
 
 data class FootballMatch(
     val id: Long,
@@ -34,6 +36,7 @@ data class FootballMatch(
     val away: String,
     val matchSlug: String,
     val competitionSlug: String,
+    val siteOrigin: String,
 ) {
     val localTime: String
         get() = DateTimeFormatter.ofPattern("dd/MM HH:mm")
@@ -44,7 +47,7 @@ data class FootballMatch(
         get() {
             val competitionPath = competitionSlug.ifBlank { slugify(competition) }
             val matchPath = matchSlug.ifBlank { slugify("$home vs $away") }
-            return "$FOOTBALL_ORIGIN/es/football/$competitionPath-$id/$matchPath.html" +
+            return "$siteOrigin/es/football/$competitionPath-$id/$matchPath.html" +
                 "?icg=RVM&ilang=es"
         }
 
@@ -59,22 +62,21 @@ class FootballBackend {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
-    private val headers = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36",
-        "Accept" to "application/json, text/plain, */*",
-        "Accept-Language" to "es-ES,es;q=0.9",
-        "Origin" to FOOTBALL_ORIGIN,
-        "Referer" to "$FOOTBALL_ORIGIN/",
-    )
+    private val browserUserAgent =
+        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 
     fun loadMatches(): List<FootballMatch> {
+        val siteOrigin = resolveCurrentSiteOrigin()
+        val footballPage = "$siteOrigin/es/football.html"
+        val headers = headersFor(siteOrigin)
         val errors = mutableListOf<String>()
-        for (apiBase in discoverApiBases()) {
+        for (apiBase in discoverApiBases(footballPage, headers)) {
             val result = runCatching {
-                val body = get("$apiBase/api/match/live?sportType=1&language=4&stream=true")
-                FootballProtoParser.parse(body)
+                val body = get("$apiBase/api/match/live?sportType=1&language=4&stream=true", headers)
+                FootballProtoParser.parse(body, siteOrigin)
             }
             result.onSuccess { matches ->
                 if (matches.isNotEmpty()) return matches
@@ -86,12 +88,74 @@ class FootballBackend {
         error("No se pudo cargar el calendario. " + errors.take(3).joinToString(" | "))
     }
 
-    private fun discoverApiBases(): List<String> {
+    private fun resolveCurrentSiteOrigin(): String {
+        val telegramHtml = runCatching {
+            get(
+                TELEGRAM_PUBLIC_FEED,
+                mapOf(
+                    "User-Agent" to browserUserAgent,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "es-ES,es;q=0.9",
+                ),
+            ).decodeToString()
+        }.getOrNull() ?: return FALLBACK_SITE_ORIGIN
+
+        val decoded = telegramHtml
+            .replace("&amp;", "&")
+            .replace("&#x2F;", "/", ignoreCase = true)
+            .replace("&#47;", "/", ignoreCase = true)
+
+        val candidates = buildList {
+            HREF.findAll(decoded).forEach { add(it.groupValues[1]) }
+            TEXT_URL.findAll(decoded).forEach { add(it.value) }
+        }
+            .map { it.trimEnd('.', ',', ';', ')', ']', '}', '\'', '"') }
+            .filter(::isExternalCandidate)
+            .distinct()
+            .reversed()
+
+        for (candidate in candidates) {
+            val resolved = validatePublicUrl(candidate) ?: continue
+            return resolved.toHttpUrl().newBuilder().encodedPath("").query(null).fragment(null).build().toString().trimEnd('/')
+        }
+        return FALLBACK_SITE_ORIGIN
+    }
+
+    private fun isExternalCandidate(url: String): Boolean {
+        val host = runCatching { url.toHttpUrl().host.lowercase() }.getOrNull() ?: return false
+        if (host == "t.me" || host.endsWith(".t.me") || host.contains("telegram")) return false
+        val ignored = listOf("youtube.com", "youtu.be", "instagram.com", "facebook.com", "x.com", "twitter.com", "tiktok.com")
+        return ignored.none { host == it || host.endsWith(".$it") }
+    }
+
+    private fun validatePublicUrl(url: String): String? = runCatching {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", browserUserAgent)
+            .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@runCatching null
+            val finalUrl = response.request.url
+            if (finalUrl.scheme != "https" && finalUrl.scheme != "http") return@runCatching null
+            finalUrl.toString()
+        }
+    }.getOrNull()
+
+    private fun headersFor(siteOrigin: String) = mapOf(
+        "User-Agent" to browserUserAgent,
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to "es-ES,es;q=0.9",
+        "Origin" to siteOrigin,
+        "Referer" to "$siteOrigin/",
+    )
+
+    private fun discoverApiBases(pageUrlText: String, headers: Map<String, String>): List<String> {
         val bases = mutableListOf<String>()
-        val pageText = runCatching { get(FOOTBALL_PAGE).decodeToString() }.getOrNull()
+        val pageText = runCatching { get(pageUrlText, headers).decodeToString() }.getOrNull()
         if (pageText != null) {
             findApiBase(pageText)?.let(bases::add)
-            val pageUrl = FOOTBALL_PAGE.toHttpUrl()
+            val pageUrl = pageUrlText.toHttpUrl()
             val scripts = SCRIPT_SRC.findAll(pageText)
                 .map { it.groupValues[1] }
                 .distinct()
@@ -99,7 +163,7 @@ class FootballBackend {
                 .toList()
             for (src in scripts) {
                 val scriptUrl = pageUrl.resolve(src)?.toString() ?: continue
-                val scriptText = runCatching { get(scriptUrl).decodeToString() }.getOrNull() ?: continue
+                val scriptText = runCatching { get(scriptUrl, headers).decodeToString() }.getOrNull() ?: continue
                 findApiBase(scriptText)?.let { base -> if (base !in bases) bases += base }
             }
         }
@@ -117,7 +181,7 @@ class FootballBackend {
         return API_ORIGIN + relative.trimEnd('/')
     }
 
-    private fun get(url: String): ByteArray {
+    private fun get(url: String, headers: Map<String, String>): ByteArray {
         val builder = Request.Builder().url(url)
         headers.forEach { (name, value) -> builder.header(name, value) }
         client.newCall(builder.build()).execute().use { response ->
@@ -131,12 +195,12 @@ class FootballBackend {
 }
 
 private object FootballProtoParser {
-    fun parse(data: ByteArray): List<FootballMatch> {
+    fun parse(data: ByteArray, siteOrigin: String): List<FootballMatch> {
         val root = messages(data, 10).firstOrNull() ?: return emptyList()
-        return messages(root, 1).mapNotNull(::parseEvent).sortedBy { it.startsAtMs }
+        return messages(root, 1).mapNotNull { parseEvent(it, siteOrigin) }.sortedBy { it.startsAtMs }
     }
 
-    private fun parseEvent(data: ByteArray): FootballMatch? {
+    private fun parseEvent(data: ByteArray, siteOrigin: String): FootballMatch? {
         val id = firstInt(data, 1)
         val starts = firstInt(data, 3)
         val competition = messages(data, 10).firstOrNull()?.let(::localizedText).orEmpty()
@@ -157,6 +221,7 @@ private object FootballProtoParser {
             away = parts.getOrElse(1) { "" }.trim(),
             matchSlug = matchSlug,
             competitionSlug = competitionSlug,
+            siteOrigin = siteOrigin,
         )
     }
 
